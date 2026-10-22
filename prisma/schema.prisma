@@ -47,6 +47,10 @@ model Shop {
   syncedAt          DateTime?
   // Picking: comma-separated "orders per round" options; the first is the default.
   pickingBatchSizes String           @default("1,4,8,16,32")
+  // Packing: PACK (tag only) | PACK_AND_FULFILL (also fulfill in Shopify).
+  packingMode       String           @default("PACK")
+  // Shop time zone (IANA, from Shopify), for "today" and per-day stats.
+  timezone          String?
   createdAt         DateTime         @default(now())
   updatedAt         DateTime         @updatedAt
   bins              Bin[]
@@ -186,25 +190,41 @@ model PickingRound {
 // - boxKey ("<shop>|<boxCode>") while the box is in use, so a box can't serve two
 //   orders. Cleared when Shopify reports the order fulfilled or cancelled.
 model PickingOrder {
-  id             Int           @id @default(autoincrement())
-  shop           String
-  shopRef        Shop          @relation(fields: [shop], references: [shop], onDelete: Cascade)
-  roundId        Int
-  round          PickingRound  @relation(fields: [roundId], references: [id], onDelete: Cascade)
-  orderId        String // gid://shopify/Order/...
-  orderName      String // e.g. #1001
-  orderCreatedAt DateTime
-  itemCount      Int // units in the order
-  position       Int // order within the round (oldest first)
-  reservationKey String?       @unique
-  boxCode        String?
-  boxKey         String?       @unique
-  boxAssignedAt  DateTime?
-  releasedAt     DateTime? // when fulfillment/cancellation freed the box
+  id                  Int           @id @default(autoincrement())
+  shop                String
+  shopRef             Shop          @relation(fields: [shop], references: [shop], onDelete: Cascade)
+  roundId             Int
+  round               PickingRound  @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  orderId             String // gid://shopify/Order/...
+  orderName           String // e.g. #1001
+  orderCreatedAt      DateTime
+  itemCount           Int // units in the order
+  position            Int // order within the round (oldest first)
+  reservationKey      String?       @unique
+  boxCode             String?
+  boxKey              String?       @unique
+  boxAssignedAt       DateTime?
+  releasedAt          DateTime? // when fulfillment/cancellation freed the box
   // Cart slot (1..n) in box scan order, fixed when picking starts.
-  slot           Int?
-  lines          PickingLine[]
-  createdAt      DateTime      @default(now())
+  slot                Int?
+  // When the "picked" tag was added in Shopify (fully picked orders only).
+  taggedAt            DateTime?
+  // Packing (after picking).
+  packedAt            DateTime?
+  packedBy            String? // Shopify user who packed it
+  packedTaggedAt      DateTime? // when the "packed" tag was added in Shopify
+  // The packing mode when it was packed: true if it still has to be fulfilled
+  // from the app (PACK_AND_FULFILL). Changing the setting later doesn't reopen
+  // orders already packed.
+  fulfillAfterPacking Boolean       @default(false)
+  // Fulfillment from the app (PACK_AND_FULFILL). fulfillingAt is a lock set while
+  // the request to Shopify runs, so a double submit can't fulfill twice.
+  fulfillingAt        DateTime?
+  fulfilledAt         DateTime?
+  trackingCompany     String?
+  trackingNumber      String?
+  lines               PickingLine[]
+  createdAt           DateTime      @default(now())
 
   @@unique([roundId, orderId])
   @@index([shop, orderId])
@@ -228,6 +248,7 @@ model PickingLine {
   barcode         String?
   imageUrl        String?
   quantity        Int
+  packed          Int           @default(0) // units checked into the parcel when packing
   tasks           PickingTask[]
 
   @@unique([pickingOrderId, inventoryItemId])

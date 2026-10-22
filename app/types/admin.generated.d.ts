@@ -86,6 +86,28 @@ export type PickingOrderLinesQuery = { nodes: Array<AdminTypes.Maybe<(
           )> } }> } }
   )>> };
 
+export type PackingFulfillmentOrdersQueryVariables = AdminTypes.Exact<{
+  id: AdminTypes.Scalars['ID']['input'];
+}>;
+
+
+export type PackingFulfillmentOrdersQuery = { order?: AdminTypes.Maybe<{ fulfillmentOrders: { nodes: Array<(
+        Pick<AdminTypes.FulfillmentOrder, 'id' | 'status'>
+        & { assignedLocation: { location?: AdminTypes.Maybe<Pick<AdminTypes.Location, 'id'>> }, supportedActions: Array<Pick<AdminTypes.FulfillmentOrderSupportedAction, 'action'>>, fulfillmentHolds: Array<Pick<AdminTypes.FulfillmentHold, 'displayReason'>> }
+      )> } }> };
+
+export type PackingFulfillMutationVariables = AdminTypes.Exact<{
+  fulfillment: AdminTypes.FulfillmentInput;
+}>;
+
+
+export type PackingFulfillMutation = { fulfillmentCreate?: AdminTypes.Maybe<{ fulfillment?: AdminTypes.Maybe<Pick<AdminTypes.Fulfillment, 'id'>>, userErrors: Array<Pick<AdminTypes.UserError, 'message'>> }> };
+
+export type ShopTimezoneQueryVariables = AdminTypes.Exact<{ [key: string]: never; }>;
+
+
+export type ShopTimezoneQuery = { shop: Pick<AdminTypes.Shop, 'ianaTimezone'> };
+
 interface GeneratedQueryTypes {
   "#graphql\n  query SettingsLocations {\n    locations(first: 250, includeInactive: false) {\n      nodes {\n        id\n        name\n        fulfillsOnlineOrders\n      }\n    }\n  }\n": {return: SettingsLocationsQuery, variables: SettingsLocationsQueryVariables},
   "#graphql\n  query SettingsLocation($id: ID!) {\n    location(id: $id) {\n      id\n      name\n      isActive\n    }\n  }\n": {return: SettingsLocationQuery, variables: SettingsLocationQueryVariables},
@@ -94,11 +116,14 @@ interface GeneratedQueryTypes {
   "#graphql\n  query ReceiveStockOnHand($itemId: ID!, $locationId: ID!) {\n    inventoryItem(id: $itemId) {\n      inventoryLevel(locationId: $locationId) {\n        quantities(names: [\"on_hand\"]) {\n          quantity\n        }\n      }\n    }\n  }\n": {return: ReceiveStockOnHandQuery, variables: ReceiveStockOnHandQueryVariables},
   "#graphql\n  query PickingCandidateOrders($query: String!, $after: String) {\n    orders(first: 50, after: $after, query: $query, sortKey: CREATED_AT) {\n      nodes {\n        id\n        name\n        createdAt\n        currentSubtotalLineItemsQuantity\n        fulfillmentOrders(first: 10, query: \"status:open\") {\n          nodes {\n            assignedLocation {\n              location {\n                id\n              }\n            }\n          }\n        }\n      }\n      pageInfo {\n        hasNextPage\n        endCursor\n      }\n    }\n  }\n": {return: PickingCandidateOrdersQuery, variables: PickingCandidateOrdersQueryVariables},
   "#graphql\n  query PickingOrderLines($ids: [ID!]!) {\n    nodes(ids: $ids) {\n      ... on Order {\n        id\n        fulfillmentOrders(first: 5, query: \"status:open\") {\n          nodes {\n            assignedLocation {\n              location {\n                id\n              }\n            }\n            lineItems(first: 50) {\n              nodes {\n                inventoryItemId\n                remainingQuantity\n                requiresShipping\n                productTitle\n                variantTitle\n                sku\n                image {\n                  url\n                }\n                variant {\n                  id\n                  barcode\n                }\n              }\n            }\n          }\n        }\n      }\n    }\n  }\n": {return: PickingOrderLinesQuery, variables: PickingOrderLinesQueryVariables},
+  "#graphql\n  query PackingFulfillmentOrders($id: ID!) {\n    order(id: $id) {\n      fulfillmentOrders(first: 10) {\n        nodes {\n          id\n          status\n          assignedLocation {\n            location {\n              id\n            }\n          }\n          supportedActions {\n            action\n          }\n          fulfillmentHolds {\n            displayReason\n          }\n        }\n      }\n    }\n  }\n": {return: PackingFulfillmentOrdersQuery, variables: PackingFulfillmentOrdersQueryVariables},
+  "#graphql\n  query ShopTimezone {\n    shop {\n      ianaTimezone\n    }\n  }\n": {return: ShopTimezoneQuery, variables: ShopTimezoneQueryVariables},
 }
 
 interface GeneratedMutationTypes {
   "#graphql\n  mutation InventorySyncRun($query: String!) {\n    bulkOperationRunQuery(query: $query) {\n      bulkOperation {\n        id\n      }\n      userErrors {\n        message\n      }\n    }\n  }\n": {return: InventorySyncRunMutation, variables: InventorySyncRunMutationVariables},
   "#graphql\n  mutation ReceiveStock(\n    $input: InventoryAdjustQuantitiesInput!\n    $idempotencyKey: String!\n  ) {\n    inventoryAdjustQuantities(input: $input)\n      @idempotent(key: $idempotencyKey) {\n      inventoryAdjustmentGroup {\n        # Only the adjusted quantity (\"available\") is returned unless asked.\n        changes(quantityNames: [\"on_hand\"]) {\n          name\n          quantityAfterChange\n        }\n      }\n      userErrors {\n        code\n        message\n      }\n    }\n  }\n": {return: ReceiveStockMutation, variables: ReceiveStockMutationVariables},
+  "#graphql\n  mutation PackingFulfill($fulfillment: FulfillmentInput!) {\n    fulfillmentCreate(fulfillment: $fulfillment) {\n      fulfillment {\n        id\n      }\n      userErrors {\n        message\n      }\n    }\n  }\n": {return: PackingFulfillMutation, variables: PackingFulfillMutationVariables},
 }
 declare module '@shopify/admin-api-client' {
   type InputMaybe<T> = AdminTypes.InputMaybe<T>;

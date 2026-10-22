@@ -25,7 +25,7 @@ Add new conventions here as they are agreed.
 ## Picking domain
 
 - A picking round (`PickingRound`) is a batch of orders picked together. The Picking menu opens the rounds list (`/app/picking`, with a "New picking round" primary action). Rounds are built with a wizard: 1 Filters (`/app/picking/new`) → 2 Orders & boxes (`/app/picking/:id`) → 3 Pick.
-- In the rounds list, in-progress rows open `/app/picking/:id`, which resumes at the current step (step 2, or redirect to step 3); completed rows open the read-only summary `/app/picking/:id/summary` (results by order, in slot order). Step 3 redirects to the summary once the round completes.
+- In the rounds list, in-progress rows open `/app/picking/:id`, which resumes at the current step (step 2, or redirect to step 3); completed rows open the read-only summary `/app/picking/:id/summary` (results by order, in slot order). Step 3 redirects to a success page (`/app/picking/:id/done`, totals + "Back to picking rounds") once the round completes; the summary is only opened from the list. When a round completes, its fully picked orders get the Shopify tag `picked` (`PICKED_ORDER_TAG`; orders with missing units don't). `tagsAdd` takes one order, so `addOrderTags` batches up to 25 aliased mutations per request; `PickingOrder.taggedAt` records success and the success page retries the rest.
 - Round statuses: `IN_PROGRESS` ("In progress", tone info; set when step 1 creates the round, so the wizard survives refreshes and can be resumed) and `COMPLETED` ("Completed", tone success). Labels/tones live in `PICKING_STATUSES` (`app/utils/picking.ts`). Filters are editable only while `IN_PROGRESS`.
 - Filters: Shopify financial status (default `paid`), optional order tag, and order count. Only unfulfilled orders of the selected location are picked.
 - "Orders per round" options come from Settings (`Shop.pickingBatchSizes`, comma-separated, first = default; parsed by `parseBatchSizes`).
@@ -41,11 +41,26 @@ Add new conventions here as they are agreed.
 - When every task is picked or short the round becomes `COMPLETED`. Reservations and boxes stay held until Shopify reports the order fulfilled or cancelled — a completed round's orders are still unfulfilled and must not be picked again. A completed step auto-advances to the next open step after 1 s.
 - Wizard pages use `inlineSize="small"`, show `PickingSteps` at the top and end with Cancel/Back + primary Next aligned right.
 
+## Packing & Fulfillment domain
+
+- Packing (`/app/packing`) starts by scanning a box; it opens the order in it (`/app/packing/:pickingOrderId`) only if its round is completed, every unit was picked (no `short`), and it isn't packed (or, in pack-and-fulfill mode, fulfilled) yet. `findBoxForPacking` explains every refusal.
+- Each product scan (or the line's + button, for manual validation or products without a barcode; − undoes) checks one unit into the parcel (`PickingLine.packed`, conditional update against over-packing). Expected per line = units picked. Wrong barcode → error. When every line is complete the order is `packedAt`, gets the Shopify tag `packed` (`PACKED_ORDER_TAG`, retried on page load via `packedTaggedAt`).
+- `Shop.packingMode`: `PACK` (tag only) or `PACK_AND_FULFILL` (Settings → Packing & Fulfillment). The mode is recorded on the order when it's packed (`PickingOrder.fulfillAfterPacking`); changing the setting later never reopens packed orders. `isPackingDone` is the single rule for "packing finished". In pack-and-fulfill the tracking modal opens when packing completes: carrier (Shopify carrier names in `CARRIERS`, or Other with name + tracking URL), tracking number, notify customer.
+- Fulfillment (`fulfillPackedOrder`): `fulfillingAt` lock against double submits; checks the order's fulfillment orders at the location (not closed/cancelled, no holds, `CREATE_FULFILLMENT` supported) and fulfills them all with `fulfillmentCreate` (needs `write_merchant_managed_fulfillment_orders`); then frees the box right away with `releaseOrder` (the `orders/fulfilled` webhook only fires when the whole order is fulfilled).
+- Like picking, packing ends on a success page (`/app/packing/:id/done`: outcome, tag status, "Pack next box" back to the box scan). Pack only: right after the last scan. Pack and fulfill: after the fulfillment; "Later" in the tracking modal leaves the order packed on its page with "Fulfill order" / "Back to packing".
+
+## Dashboard
+
+- `/app` (app home, opened by the app name in the admin) is the logistics dashboard: order flow (in picking → to pack → to fulfill → packed today), needs attention (stale rounds >2h, orders with missing items, packed >24h without fulfillment, stock mismatches, old/failed inventory sync), today + pace (avg round time, units/hour over 7 days), orders picked per day (7 days, one series, bars via `s-progress` with values beside them), inventory health, fast movers with their main bin.
+- Data comes only from the app's tables in a fixed number of aggregated queries (`getDashboard`, `app/models/dashboard.server.ts`), run in parallel — no Shopify calls besides reading the shop time zone once (`Shop.timezone`).
+- "Today" and day buckets use the shop's time zone (`app/utils/time-zone.ts`), never the server's.
+
 ## Admin UI/UX
 
 The app must look and behave like native Shopify admin. Follow the official App Home patterns and templates exactly (https://shopify.dev/docs/api/app-home) — check the matching template before building a page.
 
 - Use Polaris web components (`s-*`) only. No custom CSS, no third-party UI kits, no raw HTML layout where a component exists.
+  - End-of-flow pages (picking/packing done) use `SuccessState` (`app/components/SuccessState.tsx`): a 72px illustration in `s-image` (Polaris icons don't render large), outcome, details block, one full-width action.
   - Single exception: `DisplayText` (`app/components/DisplayText.tsx`) for values operators must read at a distance on scan screens (bin code, cart slot). Polaris has no display-size text. Don't add other custom styling.
 - Responsive props written as `@container (...)` only work inside an `s-query-container`: wrap the page content (`<s-query-container><s-stack gap="base">…`) whenever a page uses them.
 - Picking screens are used on handheld scanners (PDAs, ~360–480px wide): design them mobile-first. Use container queries at `inline-size <= 480px`, and `display="@container (...) none, auto"` to move small pieces (e.g. +/− controls) between layouts. Put what guides the operator first and largest (the bin, then the slot).
@@ -54,7 +69,7 @@ The app must look and behave like native Shopify admin. Follow the official App 
 - Saving forms: wrap the form in `<form data-save-bar>` (contextual save bar). No in-page Save buttons on edit/settings forms. Confirm success with `shopify.toast.show(...)`; show validation errors on the field (`error` prop).
 - Destructive actions: `tone="critical"` and confirm with the Modal API.
 - Lists/tables: use the Index/Resource list patterns (`s-table` with pagination, filters, empty state). Always provide an empty state.
-- Navigation lives in `s-app-nav` in `app/routes/app.tsx`.
+- Navigation lives in `s-app-nav` in `app/routes/app.tsx`. The `/app` link must keep `rel="home"`: the app name in the admin sidebar opens the home route, which otherwise defaults to `/` (no session → login form). That link is hidden from the menu; the app name is the way to the dashboard.
 - Copy: sentence case, short, Shopify admin tone (e.g. "Settings saved", "Select a location").
 
 ## Performance and data access
@@ -67,11 +82,12 @@ The app must look and behave like native Shopify admin. Follow the official App 
 - Every query is scoped by `shop`; indexes must start with the columns used in the `where` (usually `shop`, then the lookup key). Add an index with any new query pattern.
 - Use `select` to avoid loading unused columns on large tables (`BinStock`, `StockMovement`).
 - Data that list pages filter or sort on across the whole catalog (e.g. Shopify stock vs bin stock) is mirrored locally (`InventoryLevel`) and kept fresh by bulk operations + webhooks — never scan the Admin API per request.
-- Denormalized totals on `InventoryLevel` — `binQuantity` (bins), `boxQuantity` (units picked into boxes whose orders aren't fulfilled/cancelled yet) and `accountedQuantity` (= bin + box) — change only through `adjustLevelTotals` / `recomputeLevelTotals` (`app/models/inventory.server.ts`), in the same transaction as the rows they summarize.
+- Denormalized totals on `InventoryLevel` — `binQuantity` (bins), `boxQuantity` (units picked into boxes whose orders aren't fulfilled/cancelled yet) and `accountedQuantity` (= bin + box) — change only through `adjustLevelTotals` / `recomputeLevelTotals` (`app/models/inventory.server.ts`), in the same transaction as the rows they summarize. Editing `BinStock` / picking tables directly in the database (e.g. Prisma Studio) leaves them stale; a full "Sync with Shopify" recomputes them from source.
 
 ## Server/client boundary
 
 - Route components must not import anything from `*.server.ts` modules (only `loader`/`action` may); React Router fails the route at runtime and `tsc` doesn't catch it. Put values shared by UI and server (constants, pure helpers) in `app/utils/`.
+- To look at a page without the admin, render it statically (react-router `createStaticHandler` + `renderToString` with sample loader data, dummy `SHOPIFY_*` env vars), wrap it with `<script src="https://cdn.shopify.com/shopifycloud/polaris.js">`, and screenshot it with headless Chrome at desktop and 400px widths.
 - After changing a route, request it from the running dev server (or start a temporary one: `npx react-router dev --port <free port>` and stop it afterwards) (`curl http://localhost:<vite port>/app/routes/<file>`) to catch these errors.
 
 ## Database migrations
@@ -112,6 +128,6 @@ The app must look and behave like native Shopify admin. Follow the official App 
 - Route `app.<resource>.$id.tsx`; when the list has the same prefix, the list route is `app.<resource>._index.tsx` so the detail page isn't nested in it.
 - Use URL ids that survive resyncs (Shopify numeric ids, e.g. inventory item), not local autoincrement ids.
 - Back navigation in the `breadcrumb-actions` slot. Section status in `supplemental`, counts in `accessory`.
-- Put the page's main action in the page's `primary-action` slot. A section's `primary-action` slot didn't render in practice (polaris-types 1.1.0), so don't rely on it; empty states should repeat the action.
+- Put the page's main action in the page's `primary-action` slot. Action slots of `s-section` (`primary-action`) and `s-banner` (`secondary-actions`) didn't render in practice (polaris-types 1.1.0): never put buttons there — place them in the content (e.g. a right-aligned inline stack). Empty states should repeat the action.
 - Edits happen in an `s-modal` opened with `commandFor` + `command="--show"`; submit through a fetcher, keep the modal open on validation errors (shown on the field), close it with `hideOverlay()` and show a toast on success.
 - Index rows open the detail page via `clickDelegate` pointing at the link in the primary cell.

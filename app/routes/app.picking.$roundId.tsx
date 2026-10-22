@@ -301,20 +301,23 @@ export default function PickingRoundBoxes() {
               )}
 
               {orders.length > 0 && boxedCount === orders.length && (
-                <s-banner tone="success" heading="Every order has a box">
-                  {inProgress
-                    ? "Pick the items into the boxes."
-                    : "Picking is done."}
+                <s-stack gap="small">
+                  <s-banner tone="success" heading="Every order has a box">
+                    {inProgress
+                      ? "Pick the items into the boxes."
+                      : "Picking is done."}
+                  </s-banner>
                   {inProgress && (
-                    <s-button
-                      slot="secondary-actions"
-                      variant="primary"
-                      href={`/app/picking/${round.id}/pick`}
-                    >
-                      Continue to picking
-                    </s-button>
+                    <s-stack direction="inline" justifyContent="end">
+                      <s-button
+                        variant="primary"
+                        href={`/app/picking/${round.id}/pick`}
+                      >
+                        Continue to picking
+                      </s-button>
+                    </s-stack>
                   )}
-                </s-banner>
+                </s-stack>
               )}
 
               <s-grid

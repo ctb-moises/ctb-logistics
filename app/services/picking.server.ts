@@ -8,8 +8,17 @@ import {
   type PickingFilters,
   type ReservableOrder,
 } from "../models/picking.server";
-import { savePickingPlan } from "../models/picking-run.server";
-import { fetchCandidateOrders, fetchOrderLines } from "./shopify-orders.server";
+import {
+  findOrdersToTag,
+  markOrdersTagged,
+  savePickingPlan,
+} from "../models/picking-run.server";
+import { PICKED_ORDER_TAG } from "../utils/picking";
+import {
+  addOrderTags,
+  fetchCandidateOrders,
+  fetchOrderLines,
+} from "./shopify-orders.server";
 
 // Stop scanning Shopify after this many pages (50 orders each) per attempt.
 const MAX_ORDER_PAGES = 20;
@@ -114,4 +123,25 @@ export async function ensurePickingPlan(
     round.orders.map((order) => order.orderId),
   );
   await savePickingPlan(shop, roundId, round.locationId, lines);
+}
+
+// Tags a completed round's fully picked orders in Shopify. Safe to call again:
+// only orders not tagged yet are sent. Returns how many are still untagged.
+export async function tagPickedOrders(admin: AdminApiContext, roundId: number) {
+  const orders = await findOrdersToTag(roundId);
+  if (orders.length === 0) return 0;
+
+  const tagged = new Set(
+    await addOrderTags(
+      admin,
+      orders.map((order) => order.orderId),
+      [PICKED_ORDER_TAG],
+    ),
+  );
+  await markOrdersTagged(
+    orders
+      .filter((order) => tagged.has(order.orderId))
+      .map((order) => order.id),
+  );
+  return orders.length - tagged.size;
 }

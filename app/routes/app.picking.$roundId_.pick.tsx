@@ -20,7 +20,7 @@ import {
   skipStep,
   unpickUnit,
 } from "../models/picking-run.server";
-import { ensurePickingPlan } from "../services/picking.server";
+import { ensurePickingPlan, tagPickedOrders } from "../services/picking.server";
 import { DisplayText } from "../components/DisplayText";
 import { PickingSteps } from "../components/PickingSteps";
 import {
@@ -55,9 +55,9 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   const run = await getPickingRun(session.shop, roundId);
   if (!run) throw new Response("Not found", { status: 404 });
   if (!run.plannedAt) return redirect(`/app/picking/${roundId}`);
-  // A completed round (e.g. right after its last pick) shows its summary.
+  // The last pick completes the round: end the wizard on the success page.
   if (run.status === "COMPLETED") {
-    return redirect(`/app/picking/${roundId}/summary`);
+    return redirect(`/app/picking/${roundId}/done`);
   }
 
   const orders = new Map(run.orders.map((order) => [order.id, order]));
@@ -116,11 +116,25 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   };
 };
 
+// Tags the round's fully picked orders in Shopify. A failure must not undo the
+// completed round: the success page retries what's left.
+async function tagOrders(
+  admin: Parameters<typeof tagPickedOrders>[0],
+  roundId: number,
+) {
+  try {
+    await tagPickedOrders(admin, roundId);
+  } catch (error) {
+    console.error(`Tagging orders of picking round ${roundId} failed`, error);
+  }
+}
+
 export const action = async ({
   request,
   params,
 }: ActionFunctionArgs): Promise<ActionResult | Response> => {
-  const { session, sessionToken, redirect } = await authenticate.admin(request);
+  const { admin, session, sessionToken, redirect } =
+    await authenticate.admin(request);
   const roundId = Number(params.roundId);
   const context = { shop: session.shop, userId: sessionToken?.sub ?? null };
   const formData = await request.formData();
@@ -159,6 +173,7 @@ export const action = async ({
         );
         const roundComplete =
           stepComplete && (await completeRoundIfDone(session.shop, roundId));
+        if (roundComplete) await tagOrders(admin, roundId);
         return { ok: true, intent, stepComplete, roundComplete };
       }
       case "minus":
@@ -167,6 +182,7 @@ export const action = async ({
       case "skip": {
         await skipStep(session.shop, roundId, step);
         const roundComplete = await completeRoundIfDone(session.shop, roundId);
+        if (roundComplete) await tagOrders(admin, roundId);
         return { ok: true, intent, stepComplete: true, roundComplete };
       }
       case "cancel-round":

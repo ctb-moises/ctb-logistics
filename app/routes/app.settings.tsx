@@ -11,10 +11,12 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import {
   getShop,
+  setPackingMode,
   setPickingBatchSizes,
   setShopLocation,
 } from "../models/shop.server";
 import { MAX_ORDERS_PER_ROUND, parseBatchSizes } from "../utils/picking";
+import { isPackingMode, PACKING_MODES } from "../utils/packing";
 import { startInventorySync } from "../services/inventory-sync.server";
 
 type ShopifyLocation = {
@@ -64,7 +66,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   return { locations, settings };
 };
 
-type SettingsErrors = { locationId?: string; pickingBatchSizes?: string };
+type SettingsErrors = {
+  locationId?: string;
+  pickingBatchSizes?: string;
+  packingMode?: string;
+};
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
@@ -73,6 +79,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const batchSizes = parseBatchSizes(
     String(formData.get("pickingBatchSizes") ?? ""),
   );
+  const packingMode = String(formData.get("packingMode") ?? "");
   const errors: SettingsErrors = {};
 
   // Validate against Shopify so we never store an invalid id or one from another shop.
@@ -88,11 +95,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (!batchSizes) {
     errors.pickingBatchSizes = `Enter whole numbers from 1 to ${MAX_ORDERS_PER_ROUND}, separated by commas, without repeats.`;
   }
-  if (!location || !batchSizes) return { ok: false, errors };
+  if (!isPackingMode(packingMode))
+    errors.packingMode = "Select a packing mode.";
+  if (!location || !batchSizes || !isPackingMode(packingMode)) {
+    return { ok: false, errors };
+  }
 
   const previous = await getShop(session.shop);
   await setShopLocation(session.shop, location);
   await setPickingBatchSizes(session.shop, batchSizes);
+  await setPackingMode(session.shop, packingMode);
   // A new warehouse needs a fresh copy of its Shopify stock.
   if (previous?.locationId !== location.id) {
     await startInventorySync(admin, session.shop, location.id);
@@ -154,6 +166,28 @@ export default function Settings() {
               .join(", ")}
             error={actionData?.errors.pickingBatchSizes}
           />
+        </s-section>
+        <s-section
+          heading="Packing & Fulfillment"
+          subheading="What happens when every unit of an order is packed."
+        >
+          <s-choice-list
+            name="packingMode"
+            label="After packing"
+            labelAccessibilityVisibility="exclusive"
+            error={actionData?.errors.packingMode}
+          >
+            {PACKING_MODES.map((mode) => (
+              <s-choice
+                key={mode.value}
+                value={mode.value}
+                selected={(settings?.packingMode ?? "PACK") === mode.value}
+              >
+                {mode.label}
+                <s-text slot="details">{mode.details}</s-text>
+              </s-choice>
+            ))}
+          </s-choice-list>
         </s-section>
       </s-page>
     </form>

@@ -479,3 +479,57 @@ export async function getRoundSummary(shop: string, roundId: number) {
     },
   });
 }
+
+// Headline numbers of a round: orders, and units picked and missing. One query.
+export async function getRoundTotals(shop: string, roundId: number) {
+  const round = await prisma.pickingRound.findFirst({
+    where: { id: roundId, shop },
+    select: {
+      id: true,
+      status: true,
+      _count: { select: { orders: true } },
+      tasks: {
+        select: {
+          picked: true,
+          short: true,
+          line: { select: { pickingOrderId: true } },
+        },
+      },
+    },
+  });
+  if (!round) return null;
+  const incompleteOrders = new Set(
+    round.tasks
+      .filter((task) => task.short > 0)
+      .map((task) => task.line.pickingOrderId),
+  );
+  return {
+    id: round.id,
+    status: round.status,
+    orders: round._count.orders,
+    picked: round.tasks.reduce((sum, task) => sum + task.picked, 0),
+    missing: round.tasks.reduce((sum, task) => sum + task.short, 0),
+    incompleteOrders: incompleteOrders.size,
+  };
+}
+
+// Orders of a completed round picked in full and not tagged yet.
+export async function findOrdersToTag(roundId: number) {
+  return prisma.pickingOrder.findMany({
+    where: {
+      roundId,
+      taggedAt: null,
+      round: { status: "COMPLETED" },
+      lines: { none: { tasks: { some: { short: { gt: 0 } } } } },
+    },
+    select: { id: true, orderId: true },
+  });
+}
+
+export async function markOrdersTagged(ids: number[]) {
+  if (ids.length === 0) return;
+  await prisma.pickingOrder.updateMany({
+    where: { id: { in: ids } },
+    data: { taggedAt: new Date() },
+  });
+}

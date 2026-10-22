@@ -18,9 +18,14 @@ export default function App() {
   return (
     <AppProvider apiKey={apiKey}>
       <s-app-nav>
-        <s-link href="/app">Home</s-link>
+        {/* The app name in the admin sidebar opens the home route; without
+            rel="home" it opens "/", which has no session and shows the login. */}
+        <a href="/app" rel="home">
+          Dashboard
+        </a>
         <s-link href="/app/inventory">Inventory</s-link>
         <s-link href="/app/picking">Picking</s-link>
+        <s-link href="/app/packing">Packing</s-link>
         <s-link href="/app/settings">Settings</s-link>
       </s-app-nav>
       <Outlet />

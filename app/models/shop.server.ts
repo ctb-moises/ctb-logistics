@@ -1,4 +1,5 @@
 import prisma from "../db.server";
+import type { PackingMode } from "../utils/packing";
 
 // Ensures the shop row exists. Called from afterAuth and before any write that
 // depends on the shop (covers shops installed before this table existed).
@@ -26,6 +27,14 @@ export async function setPickingBatchSizes(shop: string, sizes: number[]) {
     where: { shop },
     data: { pickingBatchSizes: sizes.join(",") },
   });
+}
+
+export async function setPackingMode(shop: string, packingMode: PackingMode) {
+  return prisma.shop.update({ where: { shop }, data: { packingMode } });
+}
+
+export async function setShopTimezone(shop: string, timezone: string) {
+  return prisma.shop.update({ where: { shop }, data: { timezone } });
 }
 
 // Removes all shop data (bins, stock and movements cascade).

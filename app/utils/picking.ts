@@ -64,3 +64,6 @@ export function isValidBoxCode(code: string) {
     code.length > 0 && code.length <= BOX_CODE_MAX_LENGTH && !/\s/.test(code)
   );
 }
+
+// Shopify order tag added to orders whose items were all picked.
+export const PICKED_ORDER_TAG = "picked";

@@ -194,3 +194,158 @@ export async function fetchOrderLines(
 
   return [...lines.values()];
 }
+
+// tagsAdd takes one resource; up to this many go in one request as aliases.
+const TAGS_BATCH = 25;
+
+// Adds tags to orders, batching the mutations into few requests. Returns the ids
+// Shopify tagged. Adding a tag an order already has changes nothing, so retries
+// are safe.
+export async function addOrderTags(
+  admin: AdminApiContext,
+  orderIds: string[],
+  tags: string[],
+) {
+  const tagged: string[] = [];
+
+  for (let i = 0; i < orderIds.length; i += TAGS_BATCH) {
+    const batch = orderIds.slice(i, i + TAGS_BATCH);
+    // Built per batch size (aliases o0..oN); validated against the Admin schema
+    // when written, as codegen can't see a generated document.
+    const document = `mutation TagOrders($tags: [String!]!, ${batch
+      .map((_, n) => `$id${n}: ID!`)
+      .join(", ")}) {
+      ${batch
+        .map(
+          (_, n) =>
+            `o${n}: tagsAdd(id: $id${n}, tags: $tags) { userErrors { message } }`,
+        )
+        .join("\n")}
+    }`;
+    const response = await admin.graphql(document, {
+      variables: {
+        tags,
+        ...Object.fromEntries(batch.map((id, n) => [`id${n}`, id])),
+      },
+    });
+    const { data } = (await response.json()) as {
+      data?: Record<string, { userErrors: { message: string }[] } | null>;
+    };
+    batch.forEach((id, n) => {
+      const result = data?.[`o${n}`];
+      if (result && result.userErrors.length === 0) tagged.push(id);
+      else console.error(`Couldn't tag order ${id}`, result?.userErrors);
+    });
+  }
+
+  return tagged;
+}
+
+const FULFILLMENT_ORDERS_QUERY = `#graphql
+  query PackingFulfillmentOrders($id: ID!) {
+    order(id: $id) {
+      fulfillmentOrders(first: 10) {
+        nodes {
+          id
+          status
+          assignedLocation {
+            location {
+              id
+            }
+          }
+          supportedActions {
+            action
+          }
+          fulfillmentHolds {
+            displayReason
+          }
+        }
+      }
+    }
+  }
+`;
+
+const FULFILLMENT_CREATE_MUTATION = `#graphql
+  mutation PackingFulfill($fulfillment: FulfillmentInput!) {
+    fulfillmentCreate(fulfillment: $fulfillment) {
+      fulfillment {
+        id
+      }
+      userErrors {
+        message
+      }
+    }
+  }
+`;
+
+export class FulfillmentError extends Error {}
+
+export type Tracking = {
+  company: string | null;
+  number: string | null;
+  url: string | null;
+};
+
+// Fulfills everything the order still has to ship from the location, with
+// tracking. Checks first that Shopify allows it (open fulfillment orders, no
+// holds), so the error says why when it doesn't.
+export async function fulfillOrderAtLocation(
+  admin: AdminApiContext,
+  orderId: string,
+  locationId: string,
+  tracking: Tracking,
+  notifyCustomer: boolean,
+) {
+  const response = await admin.graphql(FULFILLMENT_ORDERS_QUERY, {
+    variables: { id: orderId },
+  });
+  const { data } = await response.json();
+  const atLocation = (data?.order?.fulfillmentOrders.nodes ?? []).filter(
+    (fulfillmentOrder) =>
+      fulfillmentOrder.assignedLocation.location?.id === locationId &&
+      fulfillmentOrder.status !== "CLOSED" &&
+      fulfillmentOrder.status !== "CANCELLED",
+  );
+
+  const held = atLocation.find(
+    (fulfillmentOrder) => fulfillmentOrder.fulfillmentHolds.length > 0,
+  );
+  if (held) {
+    throw new FulfillmentError(
+      `The order is on hold in Shopify: ${held.fulfillmentHolds[0].displayReason}. Release the hold first.`,
+    );
+  }
+  const fulfillable = atLocation.filter((fulfillmentOrder) =>
+    fulfillmentOrder.supportedActions.some(
+      (supported) => supported.action === "CREATE_FULFILLMENT",
+    ),
+  );
+  if (fulfillable.length === 0) {
+    throw new FulfillmentError(
+      "Shopify has nothing left to fulfill for this order at this location.",
+    );
+  }
+
+  const fulfillResponse = await admin.graphql(FULFILLMENT_CREATE_MUTATION, {
+    variables: {
+      fulfillment: {
+        lineItemsByFulfillmentOrder: fulfillable.map((fulfillmentOrder) => ({
+          fulfillmentOrderId: fulfillmentOrder.id,
+        })),
+        notifyCustomer,
+        trackingInfo: {
+          company: tracking.company,
+          number: tracking.number,
+          ...(tracking.url ? { url: tracking.url } : {}),
+        },
+      },
+    },
+  });
+  const result = (await fulfillResponse.json()).data?.fulfillmentCreate;
+  const error = result?.userErrors[0];
+  if (error || !result?.fulfillment) {
+    throw new FulfillmentError(
+      error?.message ?? "Shopify didn't create the fulfillment.",
+    );
+  }
+}
