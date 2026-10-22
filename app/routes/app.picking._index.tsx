@@ -153,10 +153,25 @@ export default function PickingRounds() {
             <s-table-body>
               {rounds.map((round) => {
                 const roundStatus = pickingStatus(round.status);
+                const inProgress = round.status === "IN_PROGRESS";
                 return (
-                  <s-table-row key={round.id}>
+                  <s-table-row
+                    key={round.id}
+                    clickDelegate={`round-link-${round.id}`}
+                  >
                     <s-table-cell>
-                      <s-text type="strong">#{round.id}</s-text>
+                      {/* In-progress rounds resume where they are (step 2, or step
+                          3 via redirect); completed rounds open their summary. */}
+                      <s-link
+                        id={`round-link-${round.id}`}
+                        href={
+                          inProgress
+                            ? `/app/picking/${round.id}`
+                            : `/app/picking/${round.id}/summary`
+                        }
+                      >
+                        #{round.id}
+                      </s-link>
                     </s-table-cell>
                     <s-table-cell>
                       <s-badge

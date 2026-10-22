@@ -1,5 +1,7 @@
 import { Prisma } from "@prisma/client";
 import prisma from "../db.server";
+import { restorePickedStock } from "./picking-run.server";
+import { adjustLevelTotals } from "./inventory.server";
 import type { FinancialStatus, PickingStatus } from "../utils/picking";
 
 export const PICKING_PAGE_SIZE = 50;
@@ -141,12 +143,23 @@ export async function replaceRoundOrders(
   }
 }
 
-// Deletes an in-progress round; its orders and boxes are released with it.
-export async function cancelRound(shop: string, roundId: number) {
-  const { count } = await prisma.pickingRound.deleteMany({
-    where: { id: roundId, shop, status: "IN_PROGRESS" },
+// Deletes an in-progress round; its orders and boxes are released with it, and
+// units already picked go back to their bins.
+export async function cancelRound(
+  shop: string,
+  roundId: number,
+  userId: string | null,
+) {
+  return prisma.$transaction(async (tx) => {
+    const round = await tx.pickingRound.findFirst({
+      where: { id: roundId, shop, status: "IN_PROGRESS" },
+      select: { locationId: true },
+    });
+    if (!round) return false;
+    await restorePickedStock(tx, { shop, userId }, roundId, round.locationId);
+    await tx.pickingRound.delete({ where: { id: roundId } });
+    return true;
   });
-  return count > 0;
 }
 
 // Puts an order of an in-progress round into a box. A box holds one order until
@@ -176,11 +189,14 @@ export async function assignBox(
         roundId,
         shop,
         boxCode: null,
-        round: { status: "IN_PROGRESS" },
+        round: { status: "IN_PROGRESS", plannedAt: null },
       },
       data: { boxCode, boxKey: key, boxAssignedAt: new Date() },
     });
-    if (count === 0) throw new BoxError("This order already has a box.");
+    if (count === 0)
+      throw new BoxError(
+        "This order already has a box, or picking has already started.",
+      );
   } catch (error) {
     if (isUniqueViolation(error)) {
       throw new BoxError(`Box ${boxCode} was just used for another order.`);
@@ -199,30 +215,63 @@ export async function clearBox(
       id: pickingOrderId,
       roundId,
       shop,
-      round: { status: "IN_PROGRESS" },
+      round: { status: "IN_PROGRESS", plannedAt: null },
     },
     data: { boxCode: null, boxKey: null, boxAssignedAt: null },
   });
 }
 
-// Shopify fulfilled or cancelled the order: free its box. A cancelled order also
-// stops being reserved.
-export async function releaseOrder(
-  shop: string,
-  orderId: string,
-  { cancelled }: { cancelled: boolean },
-) {
-  await prisma.pickingOrder.updateMany({
-    where: {
-      shop,
-      orderId,
-      OR: [{ boxKey: { not: null } }, { reservationKey: { not: null } }],
-    },
-    data: {
-      boxKey: null,
-      releasedAt: new Date(),
-      ...(cancelled ? { reservationKey: null } : {}),
-    },
+// Shopify fulfilled or cancelled the order: free its box and its reservation,
+// and its picked units stop counting as "in boxes" (on fulfillment Shopify's
+// on-hand drops by the same units; on cancellation they go back to the shelves
+// and show as a mismatch until put into a bin). Applied once per order.
+export async function releaseOrder(shop: string, orderId: string) {
+  await prisma.$transaction(async (tx) => {
+    const orders = await tx.pickingOrder.findMany({
+      where: { shop, orderId, releasedAt: null },
+      select: {
+        id: true,
+        round: { select: { locationId: true } },
+        lines: {
+          select: {
+            inventoryItemId: true,
+            tasks: { select: { picked: true } },
+          },
+        },
+      },
+    });
+    if (orders.length === 0) return;
+
+    await tx.pickingOrder.updateMany({
+      where: { id: { in: orders.map((order) => order.id) } },
+      data: { boxKey: null, reservationKey: null, releasedAt: new Date() },
+    });
+
+    const boxed = new Map<
+      string,
+      { locationId: string; inventoryItemId: string; units: number }
+    >();
+    for (const order of orders) {
+      for (const line of order.lines) {
+        const units = line.tasks.reduce((sum, task) => sum + task.picked, 0);
+        if (units === 0) continue;
+        const key = `${order.round.locationId}|${line.inventoryItemId}`;
+        const total = boxed.get(key) ?? {
+          locationId: order.round.locationId,
+          inventoryItemId: line.inventoryItemId,
+          units: 0,
+        };
+        total.units += units;
+        boxed.set(key, total);
+      }
+    }
+    for (const { locationId, inventoryItemId, units } of boxed.values()) {
+      await adjustLevelTotals(
+        tx,
+        { shop, locationId, inventoryItemId },
+        { box: -units },
+      );
+    }
   });
 }
 
@@ -265,4 +314,8 @@ export async function listPickingRounds(
     hasNextPage: backwards ? true : hasMore,
     hasPreviousPage: backwards ? hasMore : cursorId !== undefined,
   };
+}
+
+export async function countOrdersWithoutBox(roundId: number) {
+  return prisma.pickingOrder.count({ where: { roundId, boxCode: null } });
 }

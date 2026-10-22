@@ -2,12 +2,14 @@ import type { AdminApiContext } from "@shopify/shopify-app-react-router/server";
 import {
   createRoundWithOrders,
   findOrdersReservedElsewhere,
+  getRoundWithOrders,
   OrdersTakenError,
   replaceRoundOrders,
   type PickingFilters,
   type ReservableOrder,
 } from "../models/picking.server";
-import { fetchCandidateOrders } from "./shopify-orders.server";
+import { savePickingPlan } from "../models/picking-run.server";
+import { fetchCandidateOrders, fetchOrderLines } from "./shopify-orders.server";
 
 // Stop scanning Shopify after this many pages (50 orders each) per attempt.
 const MAX_ORDER_PAGES = 20;
@@ -93,4 +95,23 @@ export async function reserveRoundOrders(
       }
     }
   }
+}
+
+// Builds the picking plan of a round the first time step 3 opens: reads the
+// orders' line items from Shopify and lays out the route over current bin stock.
+export async function ensurePickingPlan(
+  admin: AdminApiContext,
+  shop: string,
+  roundId: number,
+) {
+  const round = await getRoundWithOrders(shop, roundId);
+  if (!round || round.plannedAt || round.status !== "IN_PROGRESS") return;
+  if (round.orders.some((order) => !order.boxCode)) return;
+
+  const lines = await fetchOrderLines(
+    admin,
+    round.locationId,
+    round.orders.map((order) => order.orderId),
+  );
+  await savePickingPlan(shop, roundId, round.locationId, lines);
 }

@@ -73,6 +73,19 @@ export type PickingCandidateOrdersQuery = { orders: { nodes: Array<(
       & { fulfillmentOrders: { nodes: Array<{ assignedLocation: { location?: AdminTypes.Maybe<Pick<AdminTypes.Location, 'id'>> } }> } }
     )>, pageInfo: Pick<AdminTypes.PageInfo, 'hasNextPage' | 'endCursor'> } };
 
+export type PickingOrderLinesQueryVariables = AdminTypes.Exact<{
+  ids: Array<AdminTypes.Scalars['ID']['input']> | AdminTypes.Scalars['ID']['input'];
+}>;
+
+
+export type PickingOrderLinesQuery = { nodes: Array<AdminTypes.Maybe<(
+    Pick<AdminTypes.Order, 'id'>
+    & { fulfillmentOrders: { nodes: Array<{ assignedLocation: { location?: AdminTypes.Maybe<Pick<AdminTypes.Location, 'id'>> }, lineItems: { nodes: Array<(
+            Pick<AdminTypes.FulfillmentOrderLineItem, 'inventoryItemId' | 'remainingQuantity' | 'requiresShipping' | 'productTitle' | 'variantTitle' | 'sku'>
+            & { image?: AdminTypes.Maybe<Pick<AdminTypes.Image, 'url'>>, variant?: AdminTypes.Maybe<Pick<AdminTypes.ProductVariant, 'id' | 'barcode'>> }
+          )> } }> } }
+  )>> };
+
 interface GeneratedQueryTypes {
   "#graphql\n  query SettingsLocations {\n    locations(first: 250, includeInactive: false) {\n      nodes {\n        id\n        name\n        fulfillsOnlineOrders\n      }\n    }\n  }\n": {return: SettingsLocationsQuery, variables: SettingsLocationsQueryVariables},
   "#graphql\n  query SettingsLocation($id: ID!) {\n    location(id: $id) {\n      id\n      name\n      isActive\n    }\n  }\n": {return: SettingsLocationQuery, variables: SettingsLocationQueryVariables},
@@ -80,6 +93,7 @@ interface GeneratedQueryTypes {
   "#graphql\n  query InventorySyncItem($itemId: ID!, $locationId: ID!) {\n    inventoryItem(id: $itemId) {\n      id\n      sku\n      tracked\n      variant {\n        id\n        title\n        barcode\n        product {\n          id\n          title\n          featuredMedia {\n            preview {\n              image {\n                url\n              }\n            }\n          }\n        }\n      }\n      inventoryLevel(locationId: $locationId) {\n        quantities(names: [\"on_hand\"]) {\n          quantity\n        }\n      }\n    }\n  }\n": {return: InventorySyncItemQuery, variables: InventorySyncItemQueryVariables},
   "#graphql\n  query ReceiveStockOnHand($itemId: ID!, $locationId: ID!) {\n    inventoryItem(id: $itemId) {\n      inventoryLevel(locationId: $locationId) {\n        quantities(names: [\"on_hand\"]) {\n          quantity\n        }\n      }\n    }\n  }\n": {return: ReceiveStockOnHandQuery, variables: ReceiveStockOnHandQueryVariables},
   "#graphql\n  query PickingCandidateOrders($query: String!, $after: String) {\n    orders(first: 50, after: $after, query: $query, sortKey: CREATED_AT) {\n      nodes {\n        id\n        name\n        createdAt\n        currentSubtotalLineItemsQuantity\n        fulfillmentOrders(first: 10, query: \"status:open\") {\n          nodes {\n            assignedLocation {\n              location {\n                id\n              }\n            }\n          }\n        }\n      }\n      pageInfo {\n        hasNextPage\n        endCursor\n      }\n    }\n  }\n": {return: PickingCandidateOrdersQuery, variables: PickingCandidateOrdersQueryVariables},
+  "#graphql\n  query PickingOrderLines($ids: [ID!]!) {\n    nodes(ids: $ids) {\n      ... on Order {\n        id\n        fulfillmentOrders(first: 5, query: \"status:open\") {\n          nodes {\n            assignedLocation {\n              location {\n                id\n              }\n            }\n            lineItems(first: 50) {\n              nodes {\n                inventoryItemId\n                remainingQuantity\n                requiresShipping\n                productTitle\n                variantTitle\n                sku\n                image {\n                  url\n                }\n                variant {\n                  id\n                  barcode\n                }\n              }\n            }\n          }\n        }\n      }\n    }\n  }\n": {return: PickingOrderLinesQuery, variables: PickingOrderLinesQueryVariables},
 }
 
 interface GeneratedMutationTypes {

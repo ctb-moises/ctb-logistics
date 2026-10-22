@@ -55,21 +55,24 @@ model Shop {
   inventory         InventoryLevel[]
   pickingRounds     PickingRound[]
   pickingOrders     PickingOrder[]
+  pickingLines      PickingLine[]
+  pickingTasks      PickingTask[]
 }
 
 // Physical storage location inside a Shopify location (aisle/rack/shelf).
 model Bin {
-  id          Int             @id @default(autoincrement())
-  shop        String
-  shopRef     Shop            @relation(fields: [shop], references: [shop], onDelete: Cascade)
-  locationId  String // Shopify location this bin belongs to
-  code        String // ex.: "A-01-03"
-  description String?
-  active      Boolean         @default(true)
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
-  stock       BinStock[]
-  movements   StockMovement[]
+  id           Int             @id @default(autoincrement())
+  shop         String
+  shopRef      Shop            @relation(fields: [shop], references: [shop], onDelete: Cascade)
+  locationId   String // Shopify location this bin belongs to
+  code         String // ex.: "A-01-03"
+  description  String?
+  active       Boolean         @default(true)
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+  stock        BinStock[]
+  movements    StockMovement[]
+  pickingTasks PickingTask[]
 
   @@unique([shop, locationId, code])
   @@index([shop, locationId])
@@ -119,26 +122,32 @@ model StockMovement {
 
 // Local copy of Shopify's on-hand stock per inventory item at the selected
 // location, kept in sync by a bulk operation plus the inventory_levels/update
-// webhook. binQuantity is the denormalized sum of BinStock.quantity for the item
-// in this location's bins, so the inventory list and the consistency filter are
-// a single indexed query. Any code that changes BinStock must update it in the
-// same transaction.
+// webhook, with the app's own totals next to it:
+// - binQuantity: units in this location's bins (sum of BinStock.quantity);
+// - boxQuantity: units picked into boxes whose orders aren't fulfilled yet
+//   (still on hand for Shopify);
+// - accountedQuantity: binQuantity + boxQuantity, stored so the list and the
+//   mismatch filter (onHand != accountedQuantity) are a single indexed query.
+// Change these totals only through adjustLevelTotals / recomputeLevelTotals
+// (app/models/inventory.server.ts), in the same transaction as the rows they sum.
 model InventoryLevel {
-  id              Int      @id @default(autoincrement())
-  shop            String
-  shopRef         Shop     @relation(fields: [shop], references: [shop], onDelete: Cascade)
-  locationId      String
-  inventoryItemId String
-  variantId       String?
-  productId       String?
-  productTitle    String
-  variantTitle    String?
-  sku             String?
-  barcode         String?
-  imageUrl        String?
-  onHand          Int      @default(0)
-  binQuantity     Int      @default(0)
-  updatedAt       DateTime @updatedAt
+  id                Int      @id @default(autoincrement())
+  shop              String
+  shopRef           Shop     @relation(fields: [shop], references: [shop], onDelete: Cascade)
+  locationId        String
+  inventoryItemId   String
+  variantId         String?
+  productId         String?
+  productTitle      String
+  variantTitle      String?
+  sku               String?
+  barcode           String?
+  imageUrl          String?
+  onHand            Int      @default(0)
+  binQuantity       Int      @default(0)
+  boxQuantity       Int      @default(0)
+  accountedQuantity Int      @default(0)
+  updatedAt         DateTime @updatedAt
 
   @@unique([shop, locationId, inventoryItemId])
   @@index([shop, locationId, productTitle, id])
@@ -160,6 +169,11 @@ model PickingRound {
   createdAt       DateTime       @default(now())
   updatedAt       DateTime       @updatedAt
   orders          PickingOrder[]
+  lines           PickingLine[]
+  tasks           PickingTask[]
+  // Step 3: set once the picking plan (lines and tasks) is built.
+  plannedAt       DateTime?
+  completedAt     DateTime?
 
   @@index([shop, status])
 }
@@ -167,28 +181,78 @@ model PickingRound {
 // An order reserved by a picking round, and the picking box it goes into.
 // Concurrency is enforced by unique keys that are only set while held:
 // - reservationKey ("<shop>|<orderId>") while the round holds the order, so two
-//   rounds can't reserve the same order. Deleting the row (cancelling the round)
-//   releases it.
+//   rounds can't reserve the same order. Held until Shopify reports the order
+//   fulfilled or cancelled; deleting the row (cancelling the round) releases it.
 // - boxKey ("<shop>|<boxCode>") while the box is in use, so a box can't serve two
 //   orders. Cleared when Shopify reports the order fulfilled or cancelled.
 model PickingOrder {
-  id             Int          @id @default(autoincrement())
+  id             Int           @id @default(autoincrement())
   shop           String
-  shopRef        Shop         @relation(fields: [shop], references: [shop], onDelete: Cascade)
+  shopRef        Shop          @relation(fields: [shop], references: [shop], onDelete: Cascade)
   roundId        Int
-  round          PickingRound @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  round          PickingRound  @relation(fields: [roundId], references: [id], onDelete: Cascade)
   orderId        String // gid://shopify/Order/...
   orderName      String // e.g. #1001
   orderCreatedAt DateTime
   itemCount      Int // units in the order
   position       Int // order within the round (oldest first)
-  reservationKey String?      @unique
+  reservationKey String?       @unique
   boxCode        String?
-  boxKey         String?      @unique
+  boxKey         String?       @unique
   boxAssignedAt  DateTime?
   releasedAt     DateTime? // when fulfillment/cancellation freed the box
-  createdAt      DateTime     @default(now())
+  // Cart slot (1..n) in box scan order, fixed when picking starts.
+  slot           Int?
+  lines          PickingLine[]
+  createdAt      DateTime      @default(now())
 
   @@unique([roundId, orderId])
   @@index([shop, orderId])
+}
+
+// What an order needs from the location: its open fulfillment order line items,
+// one row per inventory item (snapshot taken when picking starts).
+model PickingLine {
+  id              Int           @id @default(autoincrement())
+  shop            String
+  shopRef         Shop          @relation(fields: [shop], references: [shop], onDelete: Cascade)
+  roundId         Int
+  round           PickingRound  @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  pickingOrderId  Int
+  pickingOrder    PickingOrder  @relation(fields: [pickingOrderId], references: [id], onDelete: Cascade)
+  inventoryItemId String
+  variantId       String?
+  productTitle    String
+  variantTitle    String?
+  sku             String?
+  barcode         String?
+  imageUrl        String?
+  quantity        Int
+  tasks           PickingTask[]
+
+  @@unique([pickingOrderId, inventoryItemId])
+  @@index([roundId])
+}
+
+// A card of the picking route: units of one line to take from one bin (binId
+// null when no bin has stock left). Tasks with the same `step` (one product in
+// one bin) are shown together; steps follow the route (bins alphabetically).
+model PickingTask {
+  id         Int          @id @default(autoincrement())
+  shop       String
+  shopRef    Shop         @relation(fields: [shop], references: [shop], onDelete: Cascade)
+  roundId    Int
+  round      PickingRound @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  lineId     Int
+  line       PickingLine  @relation(fields: [lineId], references: [id], onDelete: Cascade)
+  step       Int
+  binId      Int?
+  bin        Bin?         @relation(fields: [binId], references: [id], onDelete: SetNull)
+  binCode    String? // snapshot, shown even if the bin is later removed
+  quantity   Int
+  picked     Int          @default(0)
+  short      Int          @default(0) // units skipped as missing
+  stockTaken Int          @default(0) // units actually removed from the bin (undo and cancel restore exactly these)
+
+  @@index([roundId, step])
 }

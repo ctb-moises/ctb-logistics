@@ -6,9 +6,7 @@ import { releaseOrder } from "../models/picking.server";
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { payload, shop } = await authenticate.webhook(request);
 
-  await releaseOrder(shop, `gid://shopify/Order/${payload.id}`, {
-    cancelled: true,
-  });
+  await releaseOrder(shop, `gid://shopify/Order/${payload.id}`);
 
   return new Response();
 };

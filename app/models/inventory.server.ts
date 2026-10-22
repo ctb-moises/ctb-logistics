@@ -1,4 +1,4 @@
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import prisma from "../db.server";
 
 export const INVENTORY_PAGE_SIZE = 50;
@@ -33,10 +33,11 @@ export async function listInventory(
 ) {
   const filters: Prisma.InventoryLevelWhereInput[] = [];
   if (status === "mismatch") {
+    // Shopify's on-hand should equal what the app accounts for (bins + boxes).
     // Prisma field references don't support `not`, so express != as < or >.
-    const binQuantity = prisma.inventoryLevel.fields.binQuantity;
+    const accounted = prisma.inventoryLevel.fields.accountedQuantity;
     filters.push({
-      OR: [{ onHand: { lt: binQuantity } }, { onHand: { gt: binQuantity } }],
+      OR: [{ onHand: { lt: accounted } }, { onHand: { gt: accounted } }],
     });
   }
   if (query) {
@@ -74,6 +75,8 @@ export async function listInventory(
       imageUrl: true,
       onHand: true,
       binQuantity: true,
+      boxQuantity: true,
+      accountedQuantity: true,
     },
   });
 
@@ -107,9 +110,67 @@ export async function listInventory(
   };
 }
 
+type LevelKey = { shop: string; locationId: string; inventoryItemId: string };
+
+// Changes an item's app totals by deltas, keeping accountedQuantity in step.
+// Call it in the same transaction as the BinStock / picking rows that changed.
+export async function adjustLevelTotals(
+  tx: Prisma.TransactionClient,
+  { shop, locationId, inventoryItemId }: LevelKey,
+  { bin = 0, box = 0 }: { bin?: number; box?: number },
+) {
+  if (bin === 0 && box === 0) return;
+  await tx.inventoryLevel.updateMany({
+    where: { shop, locationId, inventoryItemId },
+    data: {
+      binQuantity: { increment: bin },
+      boxQuantity: { increment: box },
+      accountedQuantity: { increment: bin + box },
+    },
+  });
+}
+
+// Recomputes the app totals from their sources: bin stock, and units picked into
+// boxes whose orders aren't fulfilled or cancelled yet. For the whole location,
+// or one item. Three statements, whatever the number of rows.
+export async function recomputeLevelTotals(
+  tx: Prisma.TransactionClient,
+  shop: string,
+  locationId: string,
+  inventoryItemId?: string,
+) {
+  const itemFilter = inventoryItemId
+    ? Prisma.sql`AND "inventoryItemId" = ${inventoryItemId}`
+    : Prisma.empty;
+  await tx.$executeRaw`
+    UPDATE "InventoryLevel" SET "binQuantity" = COALESCE((
+      SELECT SUM(bs."quantity") FROM "BinStock" bs
+      JOIN "Bin" b ON b."id" = bs."binId"
+      WHERE b."shop" = "InventoryLevel"."shop"
+        AND b."locationId" = "InventoryLevel"."locationId"
+        AND bs."inventoryItemId" = "InventoryLevel"."inventoryItemId"
+    ), 0)
+    WHERE "shop" = ${shop} AND "locationId" = ${locationId} ${itemFilter}`;
+  await tx.$executeRaw`
+    UPDATE "InventoryLevel" SET "boxQuantity" = COALESCE((
+      SELECT SUM(t."picked") FROM "PickingTask" t
+      JOIN "PickingLine" l ON l."id" = t."lineId"
+      JOIN "PickingOrder" o ON o."id" = l."pickingOrderId"
+      JOIN "PickingRound" r ON r."id" = t."roundId"
+      WHERE r."shop" = "InventoryLevel"."shop"
+        AND r."locationId" = "InventoryLevel"."locationId"
+        AND l."inventoryItemId" = "InventoryLevel"."inventoryItemId"
+        AND o."releasedAt" IS NULL
+    ), 0)
+    WHERE "shop" = ${shop} AND "locationId" = ${locationId} ${itemFilter}`;
+  await tx.$executeRaw`
+    UPDATE "InventoryLevel" SET "accountedQuantity" = "binQuantity" + "boxQuantity"
+    WHERE "shop" = ${shop} AND "locationId" = ${locationId} ${itemFilter}`;
+}
+
 // Replaces the shop's local inventory copy with the given location's levels (rows
 // of a previously selected location are dropped) in a single transaction, and
-// recomputes the bin totals in one statement.
+// recomputes the app totals in a few statements.
 export async function replaceInventoryLevels(
   shop: string,
   locationId: string,
@@ -126,15 +187,7 @@ export async function replaceInventoryLevels(
             .map((level) => ({ ...level, shop, locationId })),
         });
       }
-      await tx.$executeRaw`
-        UPDATE "InventoryLevel" SET "binQuantity" = COALESCE((
-          SELECT SUM(bs."quantity") FROM "BinStock" bs
-          JOIN "Bin" b ON b."id" = bs."binId"
-          WHERE b."shop" = "InventoryLevel"."shop"
-            AND b."locationId" = "InventoryLevel"."locationId"
-            AND bs."inventoryItemId" = "InventoryLevel"."inventoryItemId"
-        ), 0)
-        WHERE "shop" = ${shop} AND "locationId" = ${locationId}`;
+      await recomputeLevelTotals(tx, shop, locationId);
     },
     { timeout: 120_000 },
   );
@@ -146,26 +199,19 @@ export async function upsertInventoryLevel(
   locationId: string,
   level: InventoryLevelInput,
 ) {
-  const binTotal = await prisma.binStock.aggregate({
-    where: {
-      shop,
-      inventoryItemId: level.inventoryItemId,
-      bin: { locationId },
-    },
-    _sum: { quantity: true },
-  });
-  const binQuantity = binTotal._sum.quantity ?? 0;
-
-  return prisma.inventoryLevel.upsert({
-    where: {
-      shop_locationId_inventoryItemId: {
-        shop,
-        locationId,
-        inventoryItemId: level.inventoryItemId,
+  await prisma.$transaction(async (tx) => {
+    await tx.inventoryLevel.upsert({
+      where: {
+        shop_locationId_inventoryItemId: {
+          shop,
+          locationId,
+          inventoryItemId: level.inventoryItemId,
+        },
       },
-    },
-    create: { ...level, shop, locationId, binQuantity },
-    update: { ...level, binQuantity },
+      create: { ...level, shop, locationId },
+      update: level,
+    });
+    await recomputeLevelTotals(tx, shop, locationId, level.inventoryItemId);
   });
 }
 

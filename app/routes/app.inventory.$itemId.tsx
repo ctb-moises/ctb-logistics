@@ -111,7 +111,7 @@ export const action = async ({
       }
 
       if (intent === "add-to-bin") {
-        if (level.onHand === level.binQuantity) {
+        if (level.onHand === level.accountedQuantity) {
           return fail("code", "Stock is already consolidated.");
         }
         await addToBin(movement, level, code, quantity);
@@ -182,10 +182,14 @@ export default function InventoryDetail() {
   const [newQuantity, setNewQuantity] = useState("");
   const [receiveKey, setReceiveKey] = useState("");
 
-  const difference = level.onHand - level.binQuantity;
+  // Shopify on-hand vs what the app accounts for: units in bins plus units
+  // picked into boxes that wait to be fulfilled.
+  const difference = level.onHand - level.accountedQuantity;
   const consolidated = difference === 0;
   const coverage =
-    level.onHand > 0 ? Math.round((level.binQuantity / level.onHand) * 100) : 0;
+    level.onHand > 0
+      ? Math.round((level.accountedQuantity / level.onHand) * 100)
+      : 0;
   const saving = fetcher.state !== "idle";
   const result = fetcher.state === "idle" ? fetcher.data : undefined;
   const fieldError = (intent: string, field: "code" | "quantity") =>
@@ -199,6 +203,7 @@ export default function InventoryDetail() {
       ? Number(editQuantity) - editing.quantity
       : 0;
   const binTotalAfterEdit = level.binQuantity + editDelta;
+  const accountedAfterEdit = level.accountedQuantity + editDelta;
 
   useEffect(() => {
     if (!result?.ok) return;
@@ -280,228 +285,256 @@ export default function InventoryDetail() {
         </s-button>
       )}
 
-      {/* Product */}
-      <s-section accessibilityLabel="Product">
-        <s-grid
-          gridTemplateColumns="@container (inline-size <= 500px) 1fr, 160px 1fr"
-          gap="large"
-          alignItems="center"
-        >
-          <s-box
-            inlineSize="160px"
-            blockSize="160px"
-            border="base"
-            borderRadius="large"
-            background="subdued"
-            overflow="hidden"
-          >
-            {level.imageUrl ? (
-              <s-image
-                src={sizedImageUrl(level.imageUrl, 320)}
-                alt={level.productTitle}
-                aspectRatio="1/1"
-                objectFit="contain"
-              />
-            ) : (
-              <s-stack
-                alignItems="center"
-                justifyContent="center"
-                blockSize="100%"
-              >
-                <s-icon type="product" tone="neutral" />
-              </s-stack>
-            )}
-          </s-box>
-          <s-stack gap="base">
-            <s-stack gap="small-300">
-              <s-heading>{level.productTitle}</s-heading>
-              {level.variantTitle && (
-                <s-text color="subdued">{level.variantTitle}</s-text>
-              )}
-            </s-stack>
-            <s-stack direction="inline" gap="large">
-              <s-stack direction="inline" gap="small-300" alignItems="center">
-                <s-icon type="clipboard" tone="neutral" size="small" />
-                <s-text color="subdued">SKU</s-text>
-                <s-text type="strong">{level.sku ?? "—"}</s-text>
-              </s-stack>
-              <s-stack direction="inline" gap="small-300" alignItems="center">
-                <s-icon type="barcode" tone="neutral" size="small" />
-                <s-text color="subdued">Barcode</s-text>
-                <s-text type="strong">{level.barcode ?? "—"}</s-text>
-              </s-stack>
-            </s-stack>
-            <s-stack direction="inline">{statusBadge}</s-stack>
-          </s-stack>
-        </s-grid>
-      </s-section>
-
-      {/* Stock: metrics card + coverage */}
-      <s-section heading="Stock" accessibilityLabel="Stock">
+      {/* Container queries in these sections need a query container. */}
+      <s-query-container>
         <s-stack gap="base">
-          <s-grid
-            gridTemplateColumns="@container (inline-size <= 400px) 1fr, 1fr auto 1fr auto 1fr"
-            gap="small"
-          >
-            <s-grid gap="small-300">
-              <s-text color="subdued">Shopify stock</s-text>
-              <s-heading>{level.onHand}</s-heading>
-            </s-grid>
-            <s-divider direction="block" />
-            <s-grid gap="small-300">
-              <s-text color="subdued">In bins</s-text>
-              <s-heading>{level.binQuantity}</s-heading>
-            </s-grid>
-            <s-divider direction="block" />
-            <s-grid gap="small-300">
-              <s-text color="subdued">
-                {difference >= 0 ? "Not in a bin" : "Over Shopify stock"}
-              </s-text>
-              <s-stack direction="inline" gap="small-200" alignItems="center">
-                <s-heading>{Math.abs(difference)}</s-heading>
-                {!consolidated && (
-                  <s-badge
-                    tone="critical"
-                    icon={difference > 0 ? "arrow-down" : "arrow-up"}
-                  >
-                    {difference > 0 ? "Missing" : "Excess"}
-                  </s-badge>
-                )}
-              </s-stack>
-            </s-grid>
-          </s-grid>
-          <s-stack gap="small-300">
-            <s-progress
-              value={Math.min(level.binQuantity, level.onHand)}
-              max={Math.max(level.onHand, 1)}
-              tone={
-                consolidated ? "success" : difference < 0 ? "critical" : "auto"
-              }
-              accessibilityLabel="Stock assigned to bins"
-            />
-            <s-text color="subdued">
-              {difference < 0
-                ? `Bins hold ${-difference} more units than Shopify stock.`
-                : `${level.binQuantity} of ${level.onHand} units in bins (${coverage}%).`}
-            </s-text>
-          </s-stack>
-        </s-stack>
-      </s-section>
-
-      {/* Bins */}
-      <s-section heading="Bins">
-        <s-badge slot="accessory">{binStock.length}</s-badge>
-
-        {binStock.length === 0 ? (
-          <s-empty-state heading="No bins assigned">
-            <s-paragraph slot="subheading">
-              {level.onHand > 0
-                ? `${level.onHand} units in ${locationName} aren't assigned to a bin yet. Add the bins where this product is stored.`
-                : `This product has no stock in ${locationName}.`}
-            </s-paragraph>
-            {!consolidated && (
-              <s-button
-                slot="primary-action"
-                commandFor={BIN_MODAL_ID}
-                command="--show"
-                onClick={openAdd}
-              >
-                Add to bin
-              </s-button>
-            )}
-          </s-empty-state>
-        ) : (
-          <s-grid
-            gridTemplateColumns="repeat(auto-fill, minmax(220px, 1fr))"
-            gap="base"
-          >
-            {binStock.map((row) => (
+          {/* Product */}
+          <s-section accessibilityLabel="Product">
+            <s-grid
+              gridTemplateColumns="@container (inline-size <= 500px) 1fr, 160px 1fr"
+              gap="large"
+              alignItems="center"
+            >
               <s-box
-                key={row.id}
-                background="strong"
+                inlineSize="160px"
+                blockSize="160px"
+                border="base"
                 borderRadius="large"
-                padding="base"
+                background="subdued"
+                overflow="hidden"
               >
-                <s-stack gap="base">
-                  <s-grid
-                    gridTemplateColumns="1fr auto"
+                {level.imageUrl ? (
+                  <s-image
+                    src={sizedImageUrl(level.imageUrl, 320)}
+                    alt={level.productTitle}
+                    aspectRatio="1/1"
+                    objectFit="contain"
+                  />
+                ) : (
+                  <s-stack
                     alignItems="center"
-                    gap="small"
+                    justifyContent="center"
+                    blockSize="100%"
                   >
-                    <s-stack
-                      direction="inline"
-                      gap="small-300"
-                      alignItems="center"
-                    >
-                      <s-icon type="location" />
-                      <s-heading>{row.bin.code}</s-heading>
-                    </s-stack>
-                    <s-button
-                      variant="tertiary"
-                      icon="edit"
-                      accessibilityLabel={`Edit quantity in ${row.bin.code}`}
-                      commandFor={EDIT_MODAL_ID}
-                      command="--show"
-                      onClick={() => openEdit(row)}
-                    />
-                  </s-grid>
-                  {row.bin.description && (
-                    <s-text color="subdued">{row.bin.description}</s-text>
+                    <s-icon type="product" tone="neutral" />
+                  </s-stack>
+                )}
+              </s-box>
+              <s-stack gap="base">
+                <s-stack gap="small-300">
+                  <s-heading>{level.productTitle}</s-heading>
+                  {level.variantTitle && (
+                    <s-text color="subdued">{level.variantTitle}</s-text>
                   )}
-                  <s-stack gap="small-300">
-                    <s-stack
-                      direction="inline"
-                      gap="small-200"
-                      alignItems="baseline"
-                    >
-                      <s-heading>{row.quantity}</s-heading>
-                      <s-text color="subdued">
-                        {row.quantity === 1 ? "unit" : "units"}
-                      </s-text>
-                    </s-stack>
-                    <s-progress
-                      value={row.quantity}
-                      max={Math.max(level.binQuantity, 1)}
-                      accessibilityLabel={`Share of bin stock in ${row.bin.code}`}
-                    />
-                    <s-text color="subdued">
-                      {level.binQuantity > 0
-                        ? `${Math.round((row.quantity / level.binQuantity) * 100)}% of bin stock`
-                        : "Empty"}
-                    </s-text>
+                </s-stack>
+                <s-stack direction="inline" gap="large">
+                  <s-stack
+                    direction="inline"
+                    gap="small-300"
+                    alignItems="center"
+                  >
+                    <s-icon type="clipboard" tone="neutral" size="small" />
+                    <s-text color="subdued">SKU</s-text>
+                    <s-text type="strong">{level.sku ?? "—"}</s-text>
+                  </s-stack>
+                  <s-stack
+                    direction="inline"
+                    gap="small-300"
+                    alignItems="center"
+                  >
+                    <s-icon type="barcode" tone="neutral" size="small" />
+                    <s-text color="subdued">Barcode</s-text>
+                    <s-text type="strong">{level.barcode ?? "—"}</s-text>
                   </s-stack>
                 </s-stack>
-              </s-box>
-            ))}
-            {!consolidated && (
-              <s-clickable
-                border="base base dashed"
-                borderRadius="large"
-                padding="base"
-                commandFor={BIN_MODAL_ID}
-                command="--show"
-                onClick={openAdd}
-                accessibilityLabel="Add to bin"
+                <s-stack direction="inline">{statusBadge}</s-stack>
+              </s-stack>
+            </s-grid>
+          </s-section>
+
+          {/* Stock: metrics card + coverage */}
+          <s-section heading="Stock" accessibilityLabel="Stock">
+            <s-stack gap="base">
+              <s-grid
+                gridTemplateColumns="@container (inline-size <= 480px) 1fr 1fr, 1fr auto 1fr auto 1fr auto 1fr"
+                gap="small"
               >
-                <s-stack
-                  alignItems="center"
-                  justifyContent="center"
-                  gap="small-300"
-                  blockSize="100%"
-                >
-                  <s-icon type="plus-circle" />
-                  <s-text type="strong">Add to bin</s-text>
+                <s-grid gap="small-300">
+                  <s-text color="subdued">Shopify stock</s-text>
+                  <s-heading>{level.onHand}</s-heading>
+                </s-grid>
+                <s-divider direction="block" />
+                <s-grid gap="small-300">
+                  <s-text color="subdued">In bins</s-text>
+                  <s-heading>{level.binQuantity}</s-heading>
+                </s-grid>
+                <s-divider direction="block" />
+                <s-grid gap="small-300">
+                  <s-text color="subdued">In boxes</s-text>
+                  <s-heading>{level.boxQuantity}</s-heading>
+                </s-grid>
+                <s-divider direction="block" />
+                <s-grid gap="small-300">
                   <s-text color="subdued">
-                    {difference > 0
-                      ? `${difference} units not in a bin`
-                      : "Assign another bin"}
+                    {difference >= 0 ? "Unaccounted" : "Over Shopify stock"}
                   </s-text>
-                </s-stack>
-              </s-clickable>
+                  <s-stack
+                    direction="inline"
+                    gap="small-200"
+                    alignItems="center"
+                  >
+                    <s-heading>{Math.abs(difference)}</s-heading>
+                    {!consolidated && (
+                      <s-badge
+                        tone="critical"
+                        icon={difference > 0 ? "arrow-down" : "arrow-up"}
+                      >
+                        {difference > 0 ? "Missing" : "Excess"}
+                      </s-badge>
+                    )}
+                  </s-stack>
+                </s-grid>
+              </s-grid>
+              <s-stack gap="small-300">
+                <s-progress
+                  value={Math.min(level.accountedQuantity, level.onHand)}
+                  max={Math.max(level.onHand, 1)}
+                  tone={
+                    consolidated
+                      ? "success"
+                      : difference < 0
+                        ? "critical"
+                        : "auto"
+                  }
+                  accessibilityLabel="Stock accounted for in bins and boxes"
+                />
+                <s-text color="subdued">
+                  {difference < 0
+                    ? `Bins and boxes hold ${-difference} more units than Shopify stock.`
+                    : level.boxQuantity > 0
+                      ? `${level.accountedQuantity} of ${level.onHand} units in bins or boxes waiting to ship (${coverage}%).`
+                      : `${level.binQuantity} of ${level.onHand} units in bins (${coverage}%).`}
+                </s-text>
+              </s-stack>
+            </s-stack>
+          </s-section>
+
+          {/* Bins */}
+          <s-section heading="Bins">
+            <s-badge slot="accessory">{binStock.length}</s-badge>
+
+            {binStock.length === 0 ? (
+              <s-empty-state heading="No bins assigned">
+                <s-paragraph slot="subheading">
+                  {difference > 0
+                    ? `${difference} units in ${locationName} aren't assigned to a bin yet. Add the bins where this product is stored.`
+                    : `This product has no stock to put in a bin in ${locationName}.`}
+                </s-paragraph>
+                {!consolidated && (
+                  <s-button
+                    slot="primary-action"
+                    commandFor={BIN_MODAL_ID}
+                    command="--show"
+                    onClick={openAdd}
+                  >
+                    Add to bin
+                  </s-button>
+                )}
+              </s-empty-state>
+            ) : (
+              <s-grid
+                gridTemplateColumns="repeat(auto-fill, minmax(220px, 1fr))"
+                gap="base"
+              >
+                {binStock.map((row) => (
+                  <s-box
+                    key={row.id}
+                    background="strong"
+                    borderRadius="large"
+                    padding="base"
+                  >
+                    <s-stack gap="base">
+                      <s-grid
+                        gridTemplateColumns="1fr auto"
+                        alignItems="center"
+                        gap="small"
+                      >
+                        <s-stack
+                          direction="inline"
+                          gap="small-300"
+                          alignItems="center"
+                        >
+                          <s-icon type="location" />
+                          <s-heading>{row.bin.code}</s-heading>
+                        </s-stack>
+                        <s-button
+                          variant="tertiary"
+                          icon="edit"
+                          accessibilityLabel={`Edit quantity in ${row.bin.code}`}
+                          commandFor={EDIT_MODAL_ID}
+                          command="--show"
+                          onClick={() => openEdit(row)}
+                        />
+                      </s-grid>
+                      {row.bin.description && (
+                        <s-text color="subdued">{row.bin.description}</s-text>
+                      )}
+                      <s-stack gap="small-300">
+                        <s-stack
+                          direction="inline"
+                          gap="small-200"
+                          alignItems="baseline"
+                        >
+                          <s-heading>{row.quantity}</s-heading>
+                          <s-text color="subdued">
+                            {row.quantity === 1 ? "unit" : "units"}
+                          </s-text>
+                        </s-stack>
+                        <s-progress
+                          value={row.quantity}
+                          max={Math.max(level.binQuantity, 1)}
+                          accessibilityLabel={`Share of bin stock in ${row.bin.code}`}
+                        />
+                        <s-text color="subdued">
+                          {level.binQuantity > 0
+                            ? `${Math.round((row.quantity / level.binQuantity) * 100)}% of bin stock`
+                            : "Empty"}
+                        </s-text>
+                      </s-stack>
+                    </s-stack>
+                  </s-box>
+                ))}
+                {!consolidated && (
+                  <s-clickable
+                    border="base base dashed"
+                    borderRadius="large"
+                    padding="base"
+                    commandFor={BIN_MODAL_ID}
+                    command="--show"
+                    onClick={openAdd}
+                    accessibilityLabel="Add to bin"
+                  >
+                    <s-stack
+                      alignItems="center"
+                      justifyContent="center"
+                      gap="small-300"
+                      blockSize="100%"
+                    >
+                      <s-icon type="plus-circle" />
+                      <s-text type="strong">Add to bin</s-text>
+                      <s-text color="subdued">
+                        {difference > 0
+                          ? `${difference} units not in a bin`
+                          : "Assign another bin"}
+                      </s-text>
+                    </s-stack>
+                  </s-clickable>
+                )}
+              </s-grid>
             )}
-          </s-grid>
-        )}
-      </s-section>
+          </s-section>
+        </s-stack>
+      </s-query-container>
 
       <s-modal
         ref={editModal}
@@ -520,10 +553,12 @@ export default function InventoryDetail() {
           />
           {editDelta !== 0 && (
             <s-banner
-              tone={binTotalAfterEdit === level.onHand ? "success" : "info"}
+              tone={accountedAfterEdit === level.onHand ? "success" : "info"}
             >
-              {`${editDelta > 0 ? "+" : ""}${editDelta} units. Bin stock will be ${binTotalAfterEdit} of ${level.onHand} in Shopify`}
-              {binTotalAfterEdit === level.onHand ? " — consolidated." : "."}
+              {`${editDelta > 0 ? "+" : ""}${editDelta} units. Bin stock will be ${binTotalAfterEdit}`}
+              {level.boxQuantity > 0 ? ` (+${level.boxQuantity} in boxes)` : ""}
+              {` of ${level.onHand} in Shopify`}
+              {accountedAfterEdit === level.onHand ? " — consolidated." : "."}
             </s-banner>
           )}
         </s-stack>

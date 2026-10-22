@@ -14,10 +14,15 @@ import {
   BoxError,
   cancelRound,
   clearBox,
+  countOrdersWithoutBox,
   getRoundWithOrders,
 } from "../models/picking.server";
 import { PickingSteps } from "../components/PickingSteps";
-import { useBarcodeScanner, useWindowFocus } from "../hooks/useBarcodeScanner";
+import {
+  useBarcodeScanner,
+  useScanField,
+  useWindowFocus,
+} from "../hooks/useBarcodeScanner";
 import { beep } from "../utils/feedback";
 import {
   BOX_CODE_MAX_LENGTH,
@@ -36,9 +41,11 @@ type ActionResult =
 // Step 2 of the picking wizard: the reserved orders, each waiting for the
 // barcode of the picking box it goes into.
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, redirect } = await authenticate.admin(request);
   const round = await getRoundWithOrders(session.shop, Number(params.roundId));
   if (!round) throw new Response("Not found", { status: 404 });
+  // Boxes are fixed once picking starts: there's no going back to this step.
+  if (round.plannedAt) return redirect(`/app/picking/${round.id}/pick`);
 
   return {
     round: {
@@ -59,14 +66,14 @@ export const action = async ({
   request,
   params,
 }: ActionFunctionArgs): Promise<ActionResult | Response> => {
-  const { session, redirect } = await authenticate.admin(request);
+  const { session, sessionToken, redirect } = await authenticate.admin(request);
   const roundId = Number(params.roundId);
   const formData = await request.formData();
   const intent = String(formData.get("intent"));
   const pickingOrderId = Number(formData.get("pickingOrderId"));
 
   if (intent === "cancel-round") {
-    await cancelRound(session.shop, roundId);
+    await cancelRound(session.shop, roundId, sessionToken?.sub ?? null);
     return redirect("/app/picking");
   }
 
@@ -91,6 +98,10 @@ export const action = async ({
         return { ok: false, intent, error: error.message };
       }
       throw error;
+    }
+    // The last box was scanned: go straight to picking (step 3).
+    if ((await countOrdersWithoutBox(roundId)) === 0) {
+      return redirect(`/app/picking/${roundId}/pick`);
     }
     return {
       ok: true,
@@ -118,7 +129,8 @@ export default function PickingRoundBoxes() {
   const shopify = useAppBridge();
   const focused = useWindowFocus();
   const cancelModal = useRef<HTMLElementTagNameMap["s-modal"]>(null);
-  const [manualCode, setManualCode] = useState("");
+  const boxField = useRef<HTMLElementTagNameMap["s-text-field"]>(null);
+  const [boxCode, setBoxCode] = useState("");
 
   const inProgress = round.status === "IN_PROGRESS";
   const nextOrder = orders.find((order) => !order.boxCode);
@@ -146,7 +158,18 @@ export default function PickingRoundBoxes() {
     );
   };
 
-  useBarcodeScanner(assign, { enabled: inProgress && !!nextOrder });
+  const scanning = inProgress && !!nextOrder;
+
+  // The box field is the scan target: it keeps focus and Enter assigns. Scans
+  // that still arrive with the focus elsewhere are caught by the global reader.
+  const submitBoxField = () => {
+    if (!boxCode.trim()) return;
+    assign(boxCode);
+    setBoxCode("");
+  };
+
+  useScanField(boxField, { enabled: scanning, onEnter: submitBoxField });
+  useBarcodeScanner(assign, { enabled: scanning });
 
   // The last scan's error stays in a banner until the next action.
   const scanError =
@@ -158,6 +181,7 @@ export default function PickingRoundBoxes() {
   useEffect(() => {
     if (!result || result.intent !== "assign-box") return;
     beep(result.ok ? "success" : "error");
+    boxField.current?.focus();
     if (result.ok) {
       shopify.toast.show(`Box ${result.boxCode} → ${result.orderName}`);
     }
@@ -179,197 +203,216 @@ export default function PickingRoundBoxes() {
         </s-button>
       )}
 
-      <s-stack gap="base">
-        <PickingSteps current={2} />
+      {/* Container queries below adapt the layout to handheld scanners. */}
+      <s-query-container>
+        <s-stack gap="base">
+          <PickingSteps current={2} />
 
-        <s-section heading="Filters">
-          <s-grid
-            gridTemplateColumns="@container (inline-size <= 400px) 1fr, 1fr 1fr 1fr auto"
-            gap="base"
-            alignItems="center"
-          >
-            <s-stack gap="small-300">
-              <s-text color="subdued">Payment status</s-text>
-              <s-text type="strong">
-                {financialStatusLabel(round.financialStatus)}
-              </s-text>
-            </s-stack>
-            <s-stack gap="small-300">
-              <s-text color="subdued">Order tag</s-text>
-              <s-text type="strong">{round.orderTag ?? "Any"}</s-text>
-            </s-stack>
-            <s-stack gap="small-300">
-              <s-text color="subdued">Orders</s-text>
-              <s-text type="strong">
-                {orders.length} of {round.orderLimit}
-              </s-text>
-            </s-stack>
-            {inProgress && boxedCount === 0 && (
-              <s-button
-                variant="tertiary"
-                href={`/app/picking/new?round=${round.id}`}
-              >
-                Edit
-              </s-button>
-            )}
-          </s-grid>
-        </s-section>
-
-        <s-section heading="Orders & boxes">
-          <s-badge
-            slot="accessory"
-            tone={boxedCount === orders.length ? "success" : "info"}
-          >
-            {`${boxedCount} of ${orders.length} boxed`}
-          </s-badge>
-
-          <s-stack gap="base">
-            {inProgress && nextOrder && (
-              <>
-                {scanError ? (
-                  <s-banner tone="critical" heading="Box not assigned">
-                    {scanError} Scan another box for {nextOrder.orderName}.
-                  </s-banner>
-                ) : !focused ? (
-                  <s-banner tone="warning" heading="Scanner paused">
-                    Click anywhere on this page so it can receive scans.
-                  </s-banner>
-                ) : (
-                  <s-banner
-                    tone="info"
-                    heading={`Scan the box for ${nextOrder.orderName}`}
-                  >
-                    Ready to scan. Each order goes into its own box.
-                  </s-banner>
-                )}
-
-                <form
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    if (!manualCode.trim()) return;
-                    assign(manualCode);
-                    setManualCode("");
-                  }}
-                >
-                  <s-grid
-                    gridTemplateColumns="1fr auto"
-                    gap="small-200"
-                    alignItems="end"
-                  >
-                    <s-text-field
-                      label="Box code"
-                      placeholder="Type it if the scanner isn't working"
-                      maxLength={BOX_CODE_MAX_LENGTH}
-                      value={manualCode}
-                      onInput={(event) =>
-                        setManualCode(event.currentTarget.value)
-                      }
-                    />
-                    <s-button type="submit" loading={busy}>
-                      Assign
-                    </s-button>
-                  </s-grid>
-                </form>
-              </>
-            )}
-
-            {orders.length > 0 && boxedCount === orders.length && (
-              <s-banner tone="success" heading="Every order has a box">
-                Picking the items is the next step.
-              </s-banner>
-            )}
-
+          <s-section heading="Filters">
             <s-grid
-              gridTemplateColumns="repeat(auto-fill, minmax(220px, 1fr))"
+              gridTemplateColumns="@container (inline-size <= 400px) 1fr, 1fr 1fr 1fr auto"
               gap="base"
+              alignItems="center"
             >
-              {orders.map((order) => {
-                const isNext = inProgress && order.id === nextOrder?.id;
-                return (
-                  <s-box
-                    key={order.id}
-                    padding="base"
-                    borderRadius="large"
-                    background={order.boxCode ? "subdued" : "base"}
-                    border={
-                      isNext ? "large strong" : order.boxCode ? "none" : "base"
-                    }
+              <s-stack gap="small-300">
+                <s-text color="subdued">Payment status</s-text>
+                <s-text type="strong">
+                  {financialStatusLabel(round.financialStatus)}
+                </s-text>
+              </s-stack>
+              <s-stack gap="small-300">
+                <s-text color="subdued">Order tag</s-text>
+                <s-text type="strong">{round.orderTag ?? "Any"}</s-text>
+              </s-stack>
+              <s-stack gap="small-300">
+                <s-text color="subdued">Orders</s-text>
+                <s-text type="strong">
+                  {orders.length} of {round.orderLimit}
+                </s-text>
+              </s-stack>
+              {inProgress && boxedCount === 0 && (
+                <s-button
+                  variant="tertiary"
+                  href={`/app/picking/new?round=${round.id}`}
+                >
+                  Edit
+                </s-button>
+              )}
+            </s-grid>
+          </s-section>
+
+          <s-section heading="Orders & boxes">
+            <s-badge
+              slot="accessory"
+              tone={boxedCount === orders.length ? "success" : "info"}
+            >
+              {`${boxedCount} of ${orders.length} boxed`}
+            </s-badge>
+
+            <s-stack gap="base">
+              {inProgress && nextOrder && (
+                <>
+                  {scanError ? (
+                    <s-banner tone="critical" heading="Box not assigned">
+                      {scanError} Scan another box for {nextOrder.orderName}.
+                    </s-banner>
+                  ) : !focused ? (
+                    <s-banner tone="warning" heading="Scanner paused">
+                      Click anywhere on this page so it can receive scans.
+                    </s-banner>
+                  ) : (
+                    <s-banner
+                      tone="info"
+                      heading={`Scan the box for ${nextOrder.orderName}`}
+                    >
+                      Ready to scan. Each order goes into its own box.
+                    </s-banner>
+                  )}
+
+                  <form
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      submitBoxField();
+                    }}
                   >
-                    <s-stack gap="small">
-                      <s-grid
-                        gridTemplateColumns="1fr auto"
-                        alignItems="center"
-                        gap="small"
-                      >
-                        <s-link
-                          href={`shopify://admin/orders/${legacyId(order.orderId)}`}
-                          target="_blank"
-                        >
-                          <s-text type="strong">{order.orderName}</s-text>
-                        </s-link>
-                        {order.boxCode ? (
-                          <s-badge tone="success" icon="check-circle">
-                            Boxed
-                          </s-badge>
-                        ) : isNext ? (
-                          <s-badge tone="info" icon="barcode">
-                            Scan box
-                          </s-badge>
-                        ) : (
-                          <s-badge tone="neutral" icon="clock">
-                            Waiting
-                          </s-badge>
-                        )}
-                      </s-grid>
-                      <s-text color="subdued">
-                        <time
-                          dateTime={order.orderCreatedAt}
-                          suppressHydrationWarning
-                        >
-                          {formatDate(order.orderCreatedAt)}
-                        </time>
-                        {` · ${order.itemCount} ${order.itemCount === 1 ? "item" : "items"}`}
-                      </s-text>
-                      {order.boxCode && (
+                    <s-grid
+                      gridTemplateColumns="1fr auto"
+                      gap="small-200"
+                      alignItems="end"
+                    >
+                      <s-text-field
+                        ref={boxField}
+                        label="Box code"
+                        placeholder="Scan or type the box code"
+                        icon="barcode"
+                        autocomplete="off"
+                        maxLength={BOX_CODE_MAX_LENGTH}
+                        value={boxCode}
+                        onInput={(event) =>
+                          setBoxCode(event.currentTarget.value)
+                        }
+                      />
+                      <s-button type="submit" loading={busy}>
+                        Assign
+                      </s-button>
+                    </s-grid>
+                  </form>
+                </>
+              )}
+
+              {orders.length > 0 && boxedCount === orders.length && (
+                <s-banner tone="success" heading="Every order has a box">
+                  {inProgress
+                    ? "Pick the items into the boxes."
+                    : "Picking is done."}
+                  {inProgress && (
+                    <s-button
+                      slot="secondary-actions"
+                      variant="primary"
+                      href={`/app/picking/${round.id}/pick`}
+                    >
+                      Continue to picking
+                    </s-button>
+                  )}
+                </s-banner>
+              )}
+
+              <s-grid
+                gridTemplateColumns="repeat(auto-fill, minmax(220px, 1fr))"
+                gap="base"
+              >
+                {orders.map((order) => {
+                  const isNext = inProgress && order.id === nextOrder?.id;
+                  return (
+                    <s-box
+                      key={order.id}
+                      padding="base"
+                      borderRadius="large"
+                      background={order.boxCode ? "subdued" : "base"}
+                      border={
+                        isNext
+                          ? "large strong"
+                          : order.boxCode
+                            ? "none"
+                            : "base"
+                      }
+                    >
+                      <s-stack gap="small">
                         <s-grid
                           gridTemplateColumns="1fr auto"
                           alignItems="center"
                           gap="small"
                         >
-                          <s-stack
-                            direction="inline"
-                            gap="small-300"
-                            alignItems="center"
+                          <s-link
+                            href={`shopify://admin/orders/${legacyId(order.orderId)}`}
+                            target="_blank"
                           >
-                            <s-icon type="package" />
-                            <s-text type="strong">{order.boxCode}</s-text>
-                          </s-stack>
-                          {inProgress && (
-                            <s-button
-                              variant="tertiary"
-                              icon="x"
-                              accessibilityLabel={`Remove box from ${order.orderName}`}
-                              onClick={() =>
-                                fetcher.submit(
-                                  {
-                                    intent: "clear-box",
-                                    pickingOrderId: order.id,
-                                  },
-                                  { method: "post" },
-                                )
-                              }
-                            />
+                            <s-text type="strong">{order.orderName}</s-text>
+                          </s-link>
+                          {order.boxCode ? (
+                            <s-badge tone="success" icon="check-circle">
+                              Boxed
+                            </s-badge>
+                          ) : isNext ? (
+                            <s-badge tone="info" icon="barcode">
+                              Scan box
+                            </s-badge>
+                          ) : (
+                            <s-badge tone="neutral" icon="clock">
+                              Waiting
+                            </s-badge>
                           )}
                         </s-grid>
-                      )}
-                    </s-stack>
-                  </s-box>
-                );
-              })}
-            </s-grid>
-          </s-stack>
-        </s-section>
-      </s-stack>
+                        <s-text color="subdued">
+                          <time
+                            dateTime={order.orderCreatedAt}
+                            suppressHydrationWarning
+                          >
+                            {formatDate(order.orderCreatedAt)}
+                          </time>
+                          {` · ${order.itemCount} ${order.itemCount === 1 ? "item" : "items"}`}
+                        </s-text>
+                        {order.boxCode && (
+                          <s-grid
+                            gridTemplateColumns="1fr auto"
+                            alignItems="center"
+                            gap="small"
+                          >
+                            <s-stack
+                              direction="inline"
+                              gap="small-300"
+                              alignItems="center"
+                            >
+                              <s-icon type="package" />
+                              <s-text type="strong">{order.boxCode}</s-text>
+                            </s-stack>
+                            {inProgress && (
+                              <s-button
+                                variant="tertiary"
+                                icon="x"
+                                accessibilityLabel={`Remove box from ${order.orderName}`}
+                                onClick={() =>
+                                  fetcher.submit(
+                                    {
+                                      intent: "clear-box",
+                                      pickingOrderId: order.id,
+                                    },
+                                    { method: "post" },
+                                  )
+                                }
+                              />
+                            )}
+                          </s-grid>
+                        )}
+                      </s-stack>
+                    </s-box>
+                  );
+                })}
+              </s-grid>
+            </s-stack>
+          </s-section>
+        </s-stack>
+      </s-query-container>
 
       <s-modal
         ref={cancelModal}

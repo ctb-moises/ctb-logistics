@@ -1,4 +1,5 @@
 import prisma from "../db.server";
+import { adjustLevelTotals } from "./inventory.server";
 import { normalizeBinCode } from "../utils/bins";
 
 export class BinStockError extends Error {
@@ -42,7 +43,7 @@ type MovementContext = {
 };
 
 // Sets the quantity of an item in a bin. The BinStock row, its StockMovement and
-// the denormalized InventoryLevel.binQuantity change in one transaction.
+// the item's app totals (InventoryLevel) change in one transaction.
 export async function setBinQuantity(
   { shop, locationId, userId }: MovementContext,
   binStockId: number,
@@ -69,10 +70,11 @@ export async function setBinQuantity(
         userId,
       },
     });
-    await tx.inventoryLevel.updateMany({
-      where: { shop, locationId, inventoryItemId: current.inventoryItemId },
-      data: { binQuantity: { increment: delta } },
-    });
+    await adjustLevelTotals(
+      tx,
+      { shop, locationId, inventoryItemId: current.inventoryItemId },
+      { bin: delta },
+    );
   });
 }
 
@@ -137,13 +139,17 @@ export async function receiveIntoBin(
         idempotencyKey,
       },
     });
-    await tx.inventoryLevel.updateMany({
-      where: { shop, locationId, inventoryItemId: item.inventoryItemId },
-      data: {
-        binQuantity: { increment: quantity },
-        ...(onHandAfter !== null ? { onHand: onHandAfter } : {}),
-      },
-    });
+    await adjustLevelTotals(
+      tx,
+      { shop, locationId, inventoryItemId: item.inventoryItemId },
+      { bin: quantity },
+    );
+    if (onHandAfter !== null) {
+      await tx.inventoryLevel.updateMany({
+        where: { shop, locationId, inventoryItemId: item.inventoryItemId },
+        data: { onHand: onHandAfter },
+      });
+    }
   });
 }
 
@@ -204,9 +210,10 @@ export async function addToBin(
         userId,
       },
     });
-    await tx.inventoryLevel.updateMany({
-      where: { shop, locationId, inventoryItemId: item.inventoryItemId },
-      data: { binQuantity: { increment: quantity } },
-    });
+    await adjustLevelTotals(
+      tx,
+      { shop, locationId, inventoryItemId: item.inventoryItemId },
+      { bin: quantity },
+    );
   });
 }

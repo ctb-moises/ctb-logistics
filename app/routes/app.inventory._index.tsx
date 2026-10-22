@@ -263,12 +263,14 @@ export default function Inventory() {
               <s-table-header>Barcode</s-table-header>
               <s-table-header format="numeric">Shopify stock</s-table-header>
               <s-table-header format="numeric">Bin stock</s-table-header>
+              <s-table-header format="numeric">In boxes</s-table-header>
               <s-table-header format="numeric">Bins</s-table-header>
               <s-table-header listSlot="secondary">Status</s-table-header>
             </s-table-header-row>
             <s-table-body>
               {items.map((item) => {
-                const consolidated = item.onHand === item.binQuantity;
+                // Consolidated when Shopify on-hand = units in bins + units picked into boxes.
+                const consolidated = item.onHand === item.accountedQuantity;
                 return (
                   <s-table-row
                     key={item.id}
@@ -321,6 +323,7 @@ export default function Inventory() {
                     <s-table-cell>{item.barcode ?? "—"}</s-table-cell>
                     <s-table-cell>{item.onHand}</s-table-cell>
                     <s-table-cell>{item.binQuantity}</s-table-cell>
+                    <s-table-cell>{item.boxQuantity}</s-table-cell>
                     <s-table-cell>{item.binCount}</s-table-cell>
                     <s-table-cell>
                       <s-badge
