@@ -14,21 +14,181 @@ datasource db {
 }
 
 model Session {
-  id            String    @id
-  shop          String
-  state         String
-  isOnline      Boolean   @default(false)
-  scope         String?
-  expires       DateTime?
-  accessToken   String
-  userId        BigInt?
-  firstName     String?
-  lastName      String?
-  email         String?
-  accountOwner  Boolean   @default(false)
-  locale        String?
-  collaborator  Boolean?  @default(false)
-  emailVerified Boolean?  @default(false)
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
   refreshToken        String?
   refreshTokenExpires DateTime?
+}
+
+// Shop where the app is installed; root of all app data. Deleting the shop
+// (e.g. on the shop/redact webhook) cascades to bins, stock and movements.
+// The Shopify Location selected here is the warehouse that bin management and
+// all picking operations run against.
+model Shop {
+  shop              String           @id // myshopify domain, e.g. store.myshopify.com
+  locationId        String? // gid://shopify/Location/...
+  locationName      String?
+  // Full inventory sync (Shopify bulk operation) for the selected location.
+  syncOperationId   String? // gid://shopify/BulkOperation/...
+  syncStatus        String? // RUNNING | COMPLETED | FAILED
+  syncedAt          DateTime?
+  // Picking: comma-separated "orders per round" options; the first is the default.
+  pickingBatchSizes String           @default("1,4,8,16,32")
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  bins              Bin[]
+  binStock          BinStock[]
+  movements         StockMovement[]
+  inventory         InventoryLevel[]
+  pickingRounds     PickingRound[]
+  pickingOrders     PickingOrder[]
+}
+
+// Physical storage location inside a Shopify location (aisle/rack/shelf).
+model Bin {
+  id          Int             @id @default(autoincrement())
+  shop        String
+  shopRef     Shop            @relation(fields: [shop], references: [shop], onDelete: Cascade)
+  locationId  String // Shopify location this bin belongs to
+  code        String // ex.: "A-01-03"
+  description String?
+  active      Boolean         @default(true)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  stock       BinStock[]
+  movements   StockMovement[]
+
+  @@unique([shop, locationId, code])
+  @@index([shop, locationId])
+}
+
+// Stock of a product (inventory item) in a bin. A product can be in several
+// bins; the sum per Shopify location should match Shopify's on-hand stock.
+model BinStock {
+  id              Int      @id @default(autoincrement())
+  shop            String
+  shopRef         Shop     @relation(fields: [shop], references: [shop], onDelete: Cascade)
+  binId           Int
+  bin             Bin      @relation(fields: [binId], references: [id], onDelete: Cascade)
+  inventoryItemId String // gid://shopify/InventoryItem/... (Shopify's stock unit)
+  variantId       String? // gid://shopify/ProductVariant/... (cache)
+  sku             String? // cached for search/display
+  quantity        Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([binId, inventoryItemId])
+  @@index([shop, inventoryItemId])
+  @@index([shop, sku])
+}
+
+// Stock movement history per bin (receipts, picks, transfers, adjustments,
+// counts). Used for auditing and reconciling with Shopify.
+model StockMovement {
+  id              Int      @id @default(autoincrement())
+  shop            String
+  shopRef         Shop     @relation(fields: [shop], references: [shop], onDelete: Cascade)
+  binId           Int
+  bin             Bin      @relation(fields: [binId], references: [id], onDelete: Cascade)
+  inventoryItemId String
+  delta           Int // positive = in, negative = out
+  reason          String // RECEIVE | PICK | TRANSFER_IN | TRANSFER_OUT | ADJUST | COUNT
+  reference       String? // e.g. order or transfer id
+  userId          String? // Shopify user who made the movement
+  // Set on operations that also change Shopify (e.g. receiving): the same key is
+  // sent to Shopify as the idempotency key, so retries apply only once.
+  idempotencyKey  String?  @unique
+  createdAt       DateTime @default(now())
+
+  @@index([shop, inventoryItemId, createdAt])
+  @@index([binId, createdAt])
+}
+
+// Local copy of Shopify's on-hand stock per inventory item at the selected
+// location, kept in sync by a bulk operation plus the inventory_levels/update
+// webhook. binQuantity is the denormalized sum of BinStock.quantity for the item
+// in this location's bins, so the inventory list and the consistency filter are
+// a single indexed query. Any code that changes BinStock must update it in the
+// same transaction.
+model InventoryLevel {
+  id              Int      @id @default(autoincrement())
+  shop            String
+  shopRef         Shop     @relation(fields: [shop], references: [shop], onDelete: Cascade)
+  locationId      String
+  inventoryItemId String
+  variantId       String?
+  productId       String?
+  productTitle    String
+  variantTitle    String?
+  sku             String?
+  barcode         String?
+  imageUrl        String?
+  onHand          Int      @default(0)
+  binQuantity     Int      @default(0)
+  updatedAt       DateTime @updatedAt
+
+  @@unique([shop, locationId, inventoryItemId])
+  @@index([shop, locationId, productTitle, id])
+}
+
+// A picking round: a batch of orders picked together, built through the picking
+// wizard. Step 1 creates it (IN_PROGRESS) with the order filters; later steps add
+// orders and boxes.
+model PickingRound {
+  id              Int            @id @default(autoincrement())
+  shop            String
+  shopRef         Shop           @relation(fields: [shop], references: [shop], onDelete: Cascade)
+  locationId      String // Shopify location picked from
+  status          String         @default("IN_PROGRESS") // IN_PROGRESS | COMPLETED
+  financialStatus String // Shopify order financial status filter, e.g. "paid"
+  orderTag        String? // optional Shopify order tag filter
+  orderLimit      Int // how many orders the round picks
+  createdBy       String? // Shopify user who started the round
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  orders          PickingOrder[]
+
+  @@index([shop, status])
+}
+
+// An order reserved by a picking round, and the picking box it goes into.
+// Concurrency is enforced by unique keys that are only set while held:
+// - reservationKey ("<shop>|<orderId>") while the round holds the order, so two
+//   rounds can't reserve the same order. Deleting the row (cancelling the round)
+//   releases it.
+// - boxKey ("<shop>|<boxCode>") while the box is in use, so a box can't serve two
+//   orders. Cleared when Shopify reports the order fulfilled or cancelled.
+model PickingOrder {
+  id             Int          @id @default(autoincrement())
+  shop           String
+  shopRef        Shop         @relation(fields: [shop], references: [shop], onDelete: Cascade)
+  roundId        Int
+  round          PickingRound @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  orderId        String // gid://shopify/Order/...
+  orderName      String // e.g. #1001
+  orderCreatedAt DateTime
+  itemCount      Int // units in the order
+  position       Int // order within the round (oldest first)
+  reservationKey String?      @unique
+  boxCode        String?
+  boxKey         String?      @unique
+  boxAssignedAt  DateTime?
+  releasedAt     DateTime? // when fulfillment/cancellation freed the box
+  createdAt      DateTime     @default(now())
+
+  @@unique([roundId, orderId])
+  @@index([shop, orderId])
 }
