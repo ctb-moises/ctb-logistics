@@ -11,11 +11,17 @@ import { authenticate } from "../shopify.server";
 import { getShop } from "../models/shop.server";
 import { findBoxForPacking, listBoxesToPack } from "../models/packing.server";
 import {
+  BlockingOverlay,
+  usePageActivity,
+} from "../components/BlockingOverlay";
+
+import {
   useBarcodeScanner,
   useScanField,
   useWindowFocus,
 } from "../hooks/useBarcodeScanner";
 import { beep } from "../utils/feedback";
+import { closeScanError, ScanErrorModal } from "../components/ScanErrorModal";
 import { BOX_CODE_MAX_LENGTH, normalizeBoxCode } from "../utils/picking";
 
 // Packing starts by scanning a box: it opens the order inside it.
@@ -62,11 +68,18 @@ export default function Packing() {
   const fetcher = useFetcher<typeof action>();
   const focused = useWindowFocus();
   const boxField = useRef<HTMLElementTagNameMap["s-text-field"]>(null);
+  const scanErrorModal = useRef<HTMLElementTagNameMap["s-modal"]>(null);
   const [boxCode, setBoxCode] = useState("");
-  const busy = fetcher.state !== "idle";
+  const activity = usePageActivity(fetcher.state !== "idle", {
+    message: "Opening the box…",
+  });
+  // Busy until the box is checked and its order page loads.
+  const busy = activity.active;
   const error = fetcher.state === "idle" ? fetcher.data?.error : undefined;
 
   const open = (code: string) => {
+    // The next scan dismisses the last rejection.
+    closeScanError(scanErrorModal);
     if (busy || !code.trim()) return;
     fetcher.submit({ boxCode: code }, { method: "post" });
   };
@@ -113,21 +126,8 @@ export default function Packing() {
     <s-page heading="Packing" inlineSize="base">
       <s-query-container>
         <s-stack gap="base">
-          <s-section heading="Scan a box">
+          <s-section accessibilityLabel="Scan a box">
             <s-stack gap="base">
-              {error ? (
-                <s-banner tone="critical" heading="Can't open this box">
-                  {error}
-                </s-banner>
-              ) : !focused ? (
-                <s-banner tone="warning" heading="Scanner paused">
-                  Click anywhere on this page so it can receive scans.
-                </s-banner>
-              ) : (
-                <s-banner tone="info" heading="Ready to scan">
-                  Scan a picked box to pack its order.
-                </s-banner>
-              )}
               <form
                 onSubmit={(event) => {
                   event.preventDefault();
@@ -141,8 +141,13 @@ export default function Packing() {
                 >
                   <s-text-field
                     ref={boxField}
-                    label="Box code"
+                    label="Scan a picked box to pack its order"
                     placeholder="Scan or type the box code"
+                    details={
+                      focused
+                        ? undefined
+                        : "Scanner paused: tap anywhere on this page so it receives scans."
+                    }
                     icon="barcode"
                     autocomplete="off"
                     maxLength={BOX_CODE_MAX_LENGTH}
@@ -212,6 +217,14 @@ export default function Packing() {
           </s-section>
         </s-stack>
       </s-query-container>
+      <ScanErrorModal
+        id="box-error-modal"
+        heading="Can't open this box"
+        error={error ?? null}
+        trigger={fetcher.data}
+        modal={scanErrorModal}
+      />
+      <BlockingOverlay {...activity} />
     </s-page>
   );
 }

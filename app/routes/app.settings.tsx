@@ -5,6 +5,10 @@ import type {
   LoaderFunctionArgs,
 } from "react-router";
 import { useActionData, useLoaderData, useSubmit } from "react-router";
+import {
+  BlockingOverlay,
+  usePageActivity,
+} from "../components/BlockingOverlay";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { useAppBridge } from "@shopify/app-bridge-react";
 
@@ -116,6 +120,11 @@ export default function Settings() {
   const { locations, settings } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const submit = useSubmit();
+  // Saving may start a full inventory sync when the warehouse changes.
+  const activity = usePageActivity(false, {
+    message: "Saving settings…",
+    immediate: true,
+  });
   const shopify = useAppBridge();
 
   useEffect(() => {
@@ -189,6 +198,7 @@ export default function Settings() {
             ))}
           </s-choice-list>
         </s-section>
+        <BlockingOverlay {...activity} />
       </s-page>
     </form>
   );

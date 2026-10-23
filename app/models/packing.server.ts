@@ -1,4 +1,5 @@
 import prisma from "../db.server";
+import { sameBarcode } from "../utils/barcodes";
 
 // Packing: checking a picked order's units into its parcel, then (optionally)
 // recording its fulfillment.
@@ -162,7 +163,7 @@ export async function packUnit(
     const matching = lines.filter((line) =>
       "lineId" in unit
         ? line.id === unit.lineId
-        : line.barcode === unit.barcode,
+        : sameBarcode(line.barcode, unit.barcode),
     );
     if (matching.length === 0) {
       throw new PackingError(

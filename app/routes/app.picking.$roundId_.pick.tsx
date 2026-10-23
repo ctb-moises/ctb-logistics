@@ -22,12 +22,19 @@ import {
 } from "../models/picking-run.server";
 import { ensurePickingPlan, tagPickedOrders } from "../services/picking.server";
 import { DisplayText } from "../components/DisplayText";
+import {
+  BlockingOverlay,
+  usePageActivity,
+  type PendingAction,
+} from "../components/BlockingOverlay";
 import { PickingSteps } from "../components/PickingSteps";
+import { closeScanError, ScanErrorModal } from "../components/ScanErrorModal";
 import {
   useBarcodeScanner,
   useScanField,
   useWindowFocus,
 } from "../hooks/useBarcodeScanner";
+import { sameBarcode } from "../utils/barcodes";
 import { beep } from "../utils/feedback";
 import { sizedImageUrl } from "../utils/images";
 
@@ -156,7 +163,7 @@ export const action = async ({
               `${product.productTitle} has no barcode in Shopify. Use + to pick it.`,
             );
           }
-          if (barcode !== product.barcode) {
+          if (!sameBarcode(barcode, product.barcode)) {
             const other = await findStepByBarcode(roundId, barcode);
             return fail(
               other
@@ -203,7 +210,11 @@ export default function PickingRun() {
   const focused = useWindowFocus();
   const [searchParams, setSearchParams] = useSearchParams();
   const productField = useRef<HTMLElementTagNameMap["s-text-field"]>(null);
+  const scanErrorModal = useRef<HTMLElementTagNameMap["s-modal"]>(null);
   const [barcode, setBarcode] = useState("");
+  const [pending, setPending] = useState<PendingAction>({
+    message: "Picking…",
+  });
 
   const inProgress = round.status === "IN_PROGRESS";
   const firstOpen = steps.find((step) => !step.done) ?? steps.at(-1);
@@ -211,8 +222,22 @@ export default function PickingRun() {
     steps.find((step) => step.step === Number(searchParams.get("step"))) ??
     firstOpen;
   const currentIndex = current ? steps.indexOf(current) : -1;
-  const busy = fetcher.state !== "idle";
+  const activity = usePageActivity(fetcher.state !== "idle", pending);
+  // Busy until the action is saved and, if it navigates, the next page loads.
+  const busy = activity.active;
   const result = fetcher.state === "idle" ? fetcher.data : undefined;
+  // Units still to pick or mark missing in the whole round.
+  const remaining = totals.total - totals.picked - totals.short;
+  const stepRemaining = current
+    ? current.tasks.reduce(
+        (sum, task) => sum + task.quantity - task.picked - task.short,
+        0,
+      )
+    : 0;
+  const finishing: PendingAction = {
+    message: "Finishing the picking round…",
+    immediate: true,
+  };
   const scanError = result && !result.ok ? result.error : null;
   const scanning = inProgress && !!current && !current.done;
 
@@ -221,10 +246,26 @@ export default function PickingRun() {
 
   const submit = (data: Record<string, string | number>) => {
     if (!current) return;
+    // The round's last unit completes it (and tags orders in Shopify): block
+    // right away; single picks only block if they take a moment.
+    const intent = data.intent;
+    setPending(
+      (intent === "scan" || intent === "plus") && remaining === 1
+        ? finishing
+        : intent === "skip"
+          ? stepRemaining === remaining
+            ? finishing
+            : { message: "Marking as missing…", immediate: true }
+          : intent === "minus"
+            ? { message: "Undoing…" }
+            : { message: "Picking…" },
+    );
     fetcher.submit({ step: current.step, ...data }, { method: "post" });
   };
 
   const scan = (code: string) => {
+    // The next scan dismisses the last rejection.
+    closeScanError(scanErrorModal);
     if (busy) {
       beep("error");
       shopify.toast.show("Wait for the previous scan to finish", {
@@ -252,6 +293,7 @@ export default function PickingRun() {
       beep(result.ok ? "success" : "error");
     productField.current?.focus();
     if (!result.ok || !result.stepComplete || result.roundComplete) return;
+    shopify.toast.show("Step done");
 
     const next =
       steps.slice(currentIndex + 1).find((step) => !step.done) ??
@@ -314,10 +356,12 @@ export default function PickingRun() {
         slot="primary-action"
         variant="primary"
         tone="critical"
-        loading={busy}
-        onClick={() =>
-          fetcher.submit({ intent: "cancel-round" }, { method: "post" })
-        }
+        commandFor={CANCEL_MODAL_ID}
+        command="--hide"
+        onClick={() => {
+          setPending({ message: "Cancelling the round…", immediate: true });
+          fetcher.submit({ intent: "cancel-round" }, { method: "post" });
+        }}
       >
         Cancel round
       </s-button>
@@ -407,6 +451,12 @@ export default function PickingRun() {
                         <DisplayText align="start">
                           {current.binCode ?? "No bin"}
                         </DisplayText>
+                        {!current.binCode && (
+                          <s-text color="subdued">
+                            No bin holds it in the app: look for it, or mark it
+                            as missing.
+                          </s-text>
+                        )}
                       </s-stack>
                       <s-stack gap="small-400" alignItems="center">
                         <s-text color="subdued">Pick</s-text>
@@ -482,13 +532,6 @@ export default function PickingRun() {
                     </s-stack>
                   </s-grid>
 
-                  {!current.binCode && (
-                    <s-banner tone="warning">
-                      No bin has stock of this product in the app. Look for it
-                      in the warehouse, or mark it as missing.
-                    </s-banner>
-                  )}
-
                   <s-grid
                     gridTemplateColumns="auto 1fr auto"
                     gap="small"
@@ -528,22 +571,6 @@ export default function PickingRun() {
               {scanning && (
                 <s-section accessibilityLabel="Scan product">
                   <s-stack gap="base">
-                    {scanError ? (
-                      <s-banner tone="critical" heading="Not picked">
-                        {scanError}
-                      </s-banner>
-                    ) : !focused ? (
-                      <s-banner tone="warning" heading="Scanner paused">
-                        Click anywhere on this page so it can receive scans.
-                      </s-banner>
-                    ) : (
-                      <s-banner
-                        tone="info"
-                        heading={`Scan ${current.product.productTitle}`}
-                      >
-                        Each scan puts one unit into the next box below.
-                      </s-banner>
-                    )}
                     <form
                       onSubmit={(event) => {
                         event.preventDefault();
@@ -557,8 +584,13 @@ export default function PickingRun() {
                       >
                         <s-text-field
                           ref={productField}
-                          label="Product barcode"
+                          label={`Scan ${current.product.productTitle}`}
                           placeholder="Scan or type the product barcode"
+                          details={
+                            focused
+                              ? "Each scan puts one unit into the next box below."
+                              : "Scanner paused: tap anywhere on this page so it receives scans."
+                          }
                           icon="barcode"
                           autocomplete="off"
                           value={barcode}
@@ -573,11 +605,6 @@ export default function PickingRun() {
                     </form>
                   </s-stack>
                 </s-section>
-              )}
-              {inProgress && current.done && (
-                <s-banner tone="success" heading="Done here">
-                  Every unit of this step is picked. Moving to the next step…
-                </s-banner>
               )}
 
               {/* One card per box in this step */}
@@ -682,6 +709,14 @@ export default function PickingRun() {
       </s-query-container>
 
       {cancelModal}
+      <ScanErrorModal
+        id="pick-error-modal"
+        heading="Not picked"
+        error={scanError}
+        trigger={result}
+        modal={scanErrorModal}
+      />
+      <BlockingOverlay {...activity} />
     </s-page>
   );
 }

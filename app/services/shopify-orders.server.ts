@@ -348,4 +348,5 @@ export async function fulfillOrderAtLocation(
       error?.message ?? "Shopify didn't create the fulfillment.",
     );
   }
+  return result.fulfillment.id;
 }

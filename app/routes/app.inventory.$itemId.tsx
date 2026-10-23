@@ -24,6 +24,11 @@ import {
   ShopifyInventoryError,
 } from "../services/shopify-inventory.server";
 import { BIN_CODE_MAX_LENGTH, normalizeBinCode } from "../utils/bins";
+import {
+  BlockingOverlay,
+  usePageActivity,
+  type PendingAction,
+} from "../components/BlockingOverlay";
 import { sizedImageUrl } from "../utils/images";
 import { inventoryItemGid, legacyId } from "../utils/shopify-ids";
 
@@ -181,6 +186,7 @@ export default function InventoryDetail() {
   const [newCode, setNewCode] = useState("");
   const [newQuantity, setNewQuantity] = useState("");
   const [receiveKey, setReceiveKey] = useState("");
+  const [pending, setPending] = useState<PendingAction>({ message: "Saving…" });
 
   // Shopify on-hand vs what the app accounts for: units in bins plus units
   // picked into boxes that wait to be fulfilled.
@@ -191,6 +197,7 @@ export default function InventoryDetail() {
       ? Math.round((level.accountedQuantity / level.onHand) * 100)
       : 0;
   const saving = fetcher.state !== "idle";
+  const activity = usePageActivity(saving, pending);
   const result = fetcher.state === "idle" ? fetcher.data : undefined;
   const fieldError = (intent: string, field: "code" | "quantity") =>
     result && !result.ok && result.intent === intent && result.field === field
@@ -206,6 +213,10 @@ export default function InventoryDetail() {
   const accountedAfterEdit = level.accountedQuantity + editDelta;
 
   useEffect(() => {
+    // Receiving closes the modal to show progress: reopen it with the error.
+    if (result && !result.ok && result.intent === "receive") {
+      binModal.current?.showOverlay();
+    }
     if (!result?.ok) return;
     if (result.intent === "set-quantity") {
       editModal.current?.hideOverlay();
@@ -546,6 +557,7 @@ export default function InventoryDetail() {
           <s-number-field
             label="Quantity"
             min={0}
+            details="Set 0 to take the product out of this bin."
             step={1}
             value={editQuantity}
             onInput={(event) => setEditQuantity(event.currentTarget.value)}
@@ -566,8 +578,9 @@ export default function InventoryDetail() {
           slot="primary-action"
           variant="primary"
           loading={saving}
-          onClick={() =>
-            editing &&
+          onClick={() => {
+            if (!editing) return;
+            setPending({ message: "Saving…" });
             fetcher.submit(
               {
                 intent: "set-quantity",
@@ -575,8 +588,8 @@ export default function InventoryDetail() {
                 quantity: editQuantity,
               },
               { method: "post" },
-            )
-          }
+            );
+          }}
         >
           Save
         </s-button>
@@ -636,7 +649,17 @@ export default function InventoryDetail() {
           slot="primary-action"
           variant="primary"
           loading={saving}
-          onClick={() =>
+          onClick={() => {
+            if (receiving) {
+              // Updates Shopify: block with visible progress.
+              binModal.current?.hideOverlay();
+              setPending({
+                message: "Receiving stock in Shopify…",
+                immediate: true,
+              });
+            } else {
+              setPending({ message: "Saving…" });
+            }
             fetcher.submit(
               {
                 intent: binMode,
@@ -645,8 +668,8 @@ export default function InventoryDetail() {
                 ...(receiving ? { idempotencyKey: receiveKey } : {}),
               },
               { method: "post" },
-            )
-          }
+            );
+          }}
         >
           {receiving ? "Receive" : "Add"}
         </s-button>
@@ -658,6 +681,8 @@ export default function InventoryDetail() {
           Cancel
         </s-button>
       </s-modal>
+
+      <BlockingOverlay {...activity} />
     </s-page>
   );
 }

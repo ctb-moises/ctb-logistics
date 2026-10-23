@@ -17,7 +17,13 @@ import {
   countOrdersWithoutBox,
   getRoundWithOrders,
 } from "../models/picking.server";
+import {
+  BlockingOverlay,
+  usePageActivity,
+  type PendingAction,
+} from "../components/BlockingOverlay";
 import { PickingSteps } from "../components/PickingSteps";
+import { closeScanError, ScanErrorModal } from "../components/ScanErrorModal";
 import {
   useBarcodeScanner,
   useScanField,
@@ -130,16 +136,22 @@ export default function PickingRoundBoxes() {
   const focused = useWindowFocus();
   const cancelModal = useRef<HTMLElementTagNameMap["s-modal"]>(null);
   const boxField = useRef<HTMLElementTagNameMap["s-text-field"]>(null);
+  const scanErrorModal = useRef<HTMLElementTagNameMap["s-modal"]>(null);
   const [boxCode, setBoxCode] = useState("");
+  const [pending, setPending] = useState<PendingAction>({ message: "Saving…" });
 
   const inProgress = round.status === "IN_PROGRESS";
   const nextOrder = orders.find((order) => !order.boxCode);
   const boxedCount = orders.filter((order) => order.boxCode).length;
-  const busy = fetcher.state !== "idle";
+  const activity = usePageActivity(fetcher.state !== "idle", pending);
+  // Busy until the action is saved and, if it navigates, the next page loads.
+  const busy = activity.active;
   const result = fetcher.state === "idle" ? fetcher.data : undefined;
 
   const assign = (code: string) => {
     if (!nextOrder) return;
+    // The next scan dismisses the last rejection.
+    closeScanError(scanErrorModal);
     if (busy) {
       beep("error");
       shopify.toast.show("Wait for the previous scan to finish", {
@@ -147,6 +159,12 @@ export default function PickingRoundBoxes() {
       });
       return;
     }
+    // The last box builds the picking route (Shopify + plan): block right away.
+    setPending(
+      boxedCount === orders.length - 1
+        ? { message: "Preparing the picking route…", immediate: true }
+        : { message: "Saving the box…" },
+    );
     fetcher.submit(
       {
         intent: "assign-box",
@@ -171,7 +189,7 @@ export default function PickingRoundBoxes() {
   useScanField(boxField, { enabled: scanning, onEnter: submitBoxField });
   useBarcodeScanner(assign, { enabled: scanning });
 
-  // The last scan's error stays in a banner until the next action.
+  // A rejected scan shows in a popup (closed by OK, Enter or the next scan).
   const scanError =
     result && !result.ok && result.intent === "assign-box"
       ? result.error
@@ -252,23 +270,6 @@ export default function PickingRoundBoxes() {
             <s-stack gap="base">
               {inProgress && nextOrder && (
                 <>
-                  {scanError ? (
-                    <s-banner tone="critical" heading="Box not assigned">
-                      {scanError} Scan another box for {nextOrder.orderName}.
-                    </s-banner>
-                  ) : !focused ? (
-                    <s-banner tone="warning" heading="Scanner paused">
-                      Click anywhere on this page so it can receive scans.
-                    </s-banner>
-                  ) : (
-                    <s-banner
-                      tone="info"
-                      heading={`Scan the box for ${nextOrder.orderName}`}
-                    >
-                      Ready to scan. Each order goes into its own box.
-                    </s-banner>
-                  )}
-
                   <form
                     onSubmit={(event) => {
                       event.preventDefault();
@@ -282,8 +283,13 @@ export default function PickingRoundBoxes() {
                     >
                       <s-text-field
                         ref={boxField}
-                        label="Box code"
+                        label={`Scan the box for ${nextOrder.orderName}`}
                         placeholder="Scan or type the box code"
+                        details={
+                          focused
+                            ? "Each order goes into its own box."
+                            : "Scanner paused: tap anywhere on this page so it receives scans."
+                        }
                         icon="barcode"
                         autocomplete="off"
                         maxLength={BOX_CODE_MAX_LENGTH}
@@ -394,15 +400,16 @@ export default function PickingRoundBoxes() {
                                 variant="tertiary"
                                 icon="x"
                                 accessibilityLabel={`Remove box from ${order.orderName}`}
-                                onClick={() =>
+                                onClick={() => {
+                                  setPending({ message: "Removing the box…" });
                                   fetcher.submit(
                                     {
                                       intent: "clear-box",
                                       pickingOrderId: order.id,
                                     },
                                     { method: "post" },
-                                  )
-                                }
+                                  );
+                                }}
                               />
                             )}
                           </s-grid>
@@ -432,9 +439,11 @@ export default function PickingRoundBoxes() {
           variant="primary"
           tone="critical"
           loading={busy}
-          onClick={() =>
-            fetcher.submit({ intent: "cancel-round" }, { method: "post" })
-          }
+          onClick={() => {
+            cancelModal.current?.hideOverlay();
+            setPending({ message: "Cancelling the round…", immediate: true });
+            fetcher.submit({ intent: "cancel-round" }, { method: "post" });
+          }}
         >
           Cancel round
         </s-button>
@@ -446,6 +455,15 @@ export default function PickingRoundBoxes() {
           Keep round
         </s-button>
       </s-modal>
+
+      <ScanErrorModal
+        id="box-error-modal"
+        heading="Box not assigned"
+        error={scanError}
+        trigger={result}
+        modal={scanErrorModal}
+      />
+      <BlockingOverlay {...activity} />
     </s-page>
   );
 }

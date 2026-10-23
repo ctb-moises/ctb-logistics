@@ -15,6 +15,10 @@ import { authenticate } from "../shopify.server";
 import { getShop } from "../models/shop.server";
 import { getPickingRound } from "../models/picking.server";
 import { reserveRoundOrders } from "../services/picking.server";
+import {
+  BlockingOverlay,
+  usePageActivity,
+} from "../components/BlockingOverlay";
 import { PickingSteps } from "../components/PickingSteps";
 import {
   FINANCIAL_STATUSES,
@@ -119,6 +123,11 @@ export default function NewPickingRound() {
   const data = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
+  // "Next" reserves orders in Shopify order: it can take a few seconds.
+  const activity = usePageActivity(false, {
+    message: "Reserving orders…",
+    immediate: true,
+  });
   const errors = actionData?.errors as Record<string, string> | undefined;
 
   if (!data.configured) {
@@ -212,6 +221,7 @@ export default function NewPickingRound() {
           </s-stack>
         </s-stack>
       </Form>
+      <BlockingOverlay {...activity} />
     </s-page>
   );
 }

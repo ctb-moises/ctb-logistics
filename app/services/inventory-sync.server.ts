@@ -2,6 +2,7 @@ import type { AdminApiContext } from "@shopify/shopify-app-react-router/server";
 import prisma from "../db.server";
 import {
   deleteInventoryLevel,
+  setOnHand,
   replaceInventoryLevels,
   upsertInventoryLevel,
   type InventoryLevelInput,
@@ -252,4 +253,49 @@ export async function syncInventoryItem(
     locationId,
     toInventoryLevel(item, item.inventoryLevel.quantities?.[0]?.quantity ?? 0),
   );
+}
+
+const FULFILLMENT_STOCK_QUERY = `#graphql
+  query FulfillmentStock($id: ID!, $locationId: ID!) {
+    fulfillment(id: $id) {
+      fulfillmentLineItems(first: 100) {
+        nodes {
+          lineItem {
+            variant {
+              inventoryItem {
+                id
+                inventoryLevel(locationId: $locationId) {
+                  quantities(names: ["on_hand"]) {
+                    quantity
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+// A fulfillment (or its cancellation) changes on-hand but not "available", so
+// Shopify sends no inventory_levels/update for it: re-read the on-hand of the
+// fulfilled items at the location in one query.
+export async function refreshFulfillmentStock(
+  admin: AdminApiContext,
+  shop: string,
+  locationId: string,
+  fulfillmentId: string,
+) {
+  const response = await admin.graphql(FULFILLMENT_STOCK_QUERY, {
+    variables: { id: fulfillmentId, locationId },
+  });
+  const { data } = await response.json();
+  const onHand = new Map<string, number>();
+  for (const node of data?.fulfillment?.fulfillmentLineItems.nodes ?? []) {
+    const item = node.lineItem.variant?.inventoryItem;
+    const quantity = item?.inventoryLevel?.quantities[0]?.quantity;
+    if (item && quantity !== undefined) onHand.set(item.id, quantity);
+  }
+  await setOnHand(shop, locationId, onHand);
 }

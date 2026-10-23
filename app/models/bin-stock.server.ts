@@ -1,3 +1,4 @@
+import type { Prisma } from "@prisma/client";
 import prisma from "../db.server";
 import { adjustLevelTotals } from "./inventory.server";
 import { normalizeBinCode } from "../utils/bins";
@@ -9,6 +10,43 @@ export class BinStockError extends Error {
   ) {
     super(message);
   }
+}
+
+// A product's stock in a bin only exists while positive: the row is removed
+// when it reaches 0 (the bin itself stays). Call after decrementing.
+export async function dropEmptyBinStock(
+  tx: Prisma.TransactionClient,
+  binId: number,
+  inventoryItemId: string,
+) {
+  await tx.binStock.deleteMany({
+    where: { binId, inventoryItemId, quantity: { lte: 0 } },
+  });
+}
+
+// Puts units back into a bin, recreating the product's row if it was removed
+// when it reached 0.
+export async function returnToBin(
+  tx: Prisma.TransactionClient,
+  item: {
+    shop: string;
+    binId: number;
+    inventoryItemId: string;
+    variantId: string | null;
+    sku: string | null;
+  },
+  units: number,
+) {
+  await tx.binStock.upsert({
+    where: {
+      binId_inventoryItemId: {
+        binId: item.binId,
+        inventoryItemId: item.inventoryItemId,
+      },
+    },
+    create: { ...item, quantity: units },
+    update: { quantity: { increment: units } },
+  });
 }
 
 // Item header and its bins at the location: two queries, run in parallel.
@@ -60,6 +98,9 @@ export async function setBinQuantity(
     if (delta === 0) return;
 
     await tx.binStock.update({ where: { id: binStockId }, data: { quantity } });
+    if (quantity === 0) {
+      await dropEmptyBinStock(tx, current.binId, current.inventoryItemId);
+    }
     await tx.stockMovement.create({
       data: {
         shop,

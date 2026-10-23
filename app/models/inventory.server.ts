@@ -1,9 +1,16 @@
 import { Prisma } from "@prisma/client";
 import prisma from "../db.server";
+import { canonicalBarcode } from "../utils/barcodes";
 
 export const INVENTORY_PAGE_SIZE = 50;
 
-export type StockStatusFilter = "all" | "mismatch";
+export type StockStatusFilter = "all" | "mismatch" | "in-boxes";
+
+export const STOCK_STATUS_FILTERS: StockStatusFilter[] = [
+  "all",
+  "mismatch",
+  "in-boxes",
+];
 
 export type InventoryLevelInput = {
   inventoryItemId: string;
@@ -40,6 +47,10 @@ export async function listInventory(
       OR: [{ onHand: { lt: accounted } }, { onHand: { gt: accounted } }],
     });
   }
+  if (status === "in-boxes") {
+    // Picked into boxes whose orders aren't fulfilled yet.
+    filters.push({ boxQuantity: { gt: 0 } });
+  }
   if (query) {
     // SQLite LIKE: case-insensitive for ASCII. Scans the shop's location rows;
     // move to full-text search if catalogs grow large.
@@ -48,7 +59,8 @@ export async function listInventory(
         { productTitle: { contains: query } },
         { variantTitle: { contains: query } },
         { sku: { contains: query } },
-        { barcode: { contains: query } },
+        // GTINs match with or without leading zeros (UPC-A vs EAN-13).
+        { barcode: { contains: canonicalBarcode(query) } },
       ],
     });
   }
@@ -223,4 +235,21 @@ export async function deleteInventoryLevel(
   return prisma.inventoryLevel.deleteMany({
     where: { shop, locationId, inventoryItemId },
   });
+}
+
+// Sets Shopify's on-hand for several items read from the API (absolute values).
+export async function setOnHand(
+  shop: string,
+  locationId: string,
+  onHand: Map<string, number>,
+) {
+  if (onHand.size === 0) return;
+  await prisma.$transaction(
+    [...onHand].map(([inventoryItemId, quantity]) =>
+      prisma.inventoryLevel.updateMany({
+        where: { shop, locationId, inventoryItemId },
+        data: { onHand: quantity },
+      }),
+    ),
+  );
 }

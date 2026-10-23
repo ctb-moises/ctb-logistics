@@ -23,6 +23,12 @@ import {
   useScanField,
   useWindowFocus,
 } from "../hooks/useBarcodeScanner";
+import {
+  BlockingOverlay,
+  usePageActivity,
+  type PendingAction,
+} from "../components/BlockingOverlay";
+import { closeScanError, ScanErrorModal } from "../components/ScanErrorModal";
 import { beep } from "../utils/feedback";
 import { sizedImageUrl } from "../utils/images";
 import { CARRIERS, OTHER_CARRIER, TRACKING_MAX_LENGTH } from "../utils/packing";
@@ -161,15 +167,23 @@ export default function PackOrder() {
   const shopify = useAppBridge();
   const focused = useWindowFocus();
   const productField = useRef<HTMLElementTagNameMap["s-text-field"]>(null);
+  const scanErrorModal = useRef<HTMLElementTagNameMap["s-modal"]>(null);
   const fulfillModal = useRef<HTMLElementTagNameMap["s-modal"]>(null);
+  const trackingField = useRef<HTMLElementTagNameMap["s-text-field"]>(null);
+  const [fulfillOpen, setFulfillOpen] = useState(false);
   const [barcode, setBarcode] = useState("");
+  const [pending, setPending] = useState<PendingAction>({
+    message: "Packing…",
+  });
   const [carrier, setCarrier] = useState<string>(CARRIERS[0]);
   const [otherCarrier, setOtherCarrier] = useState("");
   const [trackingNumber, setTrackingNumber] = useState("");
   const [trackingUrl, setTrackingUrl] = useState("");
   const [notifyCustomer, setNotifyCustomer] = useState(true);
 
-  const busy = fetcher.state !== "idle";
+  const activity = usePageActivity(fetcher.state !== "idle", pending);
+  // Busy until the action is saved and, if it navigates, the next page loads.
+  const busy = activity.active;
   const result = fetcher.state === "idle" ? fetcher.data : undefined;
   const scanError =
     result && !result.ok && result.intent !== "fulfill" ? result.error : null;
@@ -183,13 +197,23 @@ export default function PackOrder() {
   const units = lines.reduce((sum, line) => sum + line.expected, 0);
   const packedUnits = lines.reduce((sum, line) => sum + line.packed, 0);
 
-  const scan = (code: string) => {
+  // The order's last unit finishes packing (tag in Shopify, then the success
+  // page or the tracking modal): block right away.
+  const packUnit = (data: Record<string, string | number>) => {
+    // The next scan dismisses the last rejection.
+    closeScanError(scanErrorModal);
     if (busy) {
       beep("error");
       return;
     }
-    fetcher.submit({ intent: "scan", barcode: code }, { method: "post" });
+    setPending(
+      packedUnits === units - 1
+        ? { message: "Finishing packing…", immediate: true }
+        : { message: "Packing…" },
+    );
+    fetcher.submit(data, { method: "post" });
   };
+  const scan = (code: string) => packUnit({ intent: "scan", barcode: code });
   useScanField(productField, {
     enabled: packing,
     onEnter: () => {
@@ -199,11 +223,26 @@ export default function PackOrder() {
     },
   });
   useBarcodeScanner(scan, { enabled: packing });
+  // With the tracking modal open, a scan anywhere is the tracking number (the
+  // field also takes focus when the modal opens). It doesn't submit: the packer
+  // checks the carrier and confirms.
+  useBarcodeScanner(
+    (code) => {
+      setTrackingNumber(code);
+      trackingField.current?.focus();
+      beep("success");
+    },
+    { enabled: fulfillOpen },
+  );
 
   useEffect(() => {
     if (!result) return;
     if (result.intent === "scan" || !result.ok)
       beep(result.ok ? "success" : "error");
+    // The modal was closed to show progress: bring it back with the error.
+    if (!result.ok && result.intent === "fulfill") {
+      fulfillModal.current?.showOverlay();
+    }
     if (!result.ok) return;
     // Pack and fulfill: once packed, go straight to tracking.
     if (result.complete) {
@@ -298,19 +337,6 @@ export default function PackOrder() {
           {packing && (
             <s-section accessibilityLabel="Scan products">
               <s-stack gap="base">
-                {scanError ? (
-                  <s-banner tone="critical" heading="Not packed">
-                    {scanError}
-                  </s-banner>
-                ) : !focused ? (
-                  <s-banner tone="warning" heading="Scanner paused">
-                    Click anywhere on this page so it can receive scans.
-                  </s-banner>
-                ) : (
-                  <s-banner tone="info" heading="Scan each product">
-                    Every scan checks one unit into the parcel.
-                  </s-banner>
-                )}
                 <form
                   onSubmit={(event) => {
                     event.preventDefault();
@@ -326,8 +352,13 @@ export default function PackOrder() {
                   >
                     <s-text-field
                       ref={productField}
-                      label="Product barcode"
+                      label="Scan each product"
                       placeholder="Scan or type the product barcode"
+                      details={
+                        focused
+                          ? "Every scan checks one unit into the parcel."
+                          : "Scanner paused: tap anywhere on this page so it receives scans."
+                      }
                       icon="barcode"
                       autocomplete="off"
                       value={barcode}
@@ -428,12 +459,13 @@ export default function PackOrder() {
                             icon="minus"
                             accessibilityLabel={`Take one ${line.productTitle} out of the parcel`}
                             disabled={line.packed === 0 || busy}
-                            onClick={() =>
+                            onClick={() => {
+                              setPending({ message: "Undoing…" });
                               fetcher.submit(
                                 { intent: "minus", lineId: line.id },
                                 { method: "post" },
-                              )
-                            }
+                              );
+                            }}
                           />
                         )}
                         <s-heading>{`${line.packed}/${line.expected}`}</s-heading>
@@ -443,10 +475,7 @@ export default function PackOrder() {
                             accessibilityLabel={`Check one ${line.productTitle} into the parcel`}
                             disabled={complete || busy}
                             onClick={() =>
-                              fetcher.submit(
-                                { intent: "plus", lineId: line.id },
-                                { method: "post" },
-                              )
+                              packUnit({ intent: "plus", lineId: line.id })
                             }
                           />
                         )}
@@ -464,6 +493,9 @@ export default function PackOrder() {
         ref={fulfillModal}
         id={FULFILL_MODAL_ID}
         heading={`Fulfill ${order.orderName}`}
+        onShow={() => setFulfillOpen(true)}
+        onAfterShow={() => trackingField.current?.focus()}
+        onHide={() => setFulfillOpen(false)}
       >
         <s-stack gap="base">
           {fulfillError && (
@@ -474,7 +506,13 @@ export default function PackOrder() {
           <s-select
             label="Carrier"
             value={carrier}
-            onChange={(event) => setCarrier(event.currentTarget.value)}
+            onChange={(event) => {
+              const value = event.currentTarget.value;
+              setCarrier(value);
+              // Next comes the tracking number (unless the carrier name must
+              // be typed): keep scans out of the select.
+              if (value !== OTHER_CARRIER) trackingField.current?.focus();
+            }}
           >
             {CARRIERS.map((name) => (
               <s-option key={name} value={name}>
@@ -502,7 +540,9 @@ export default function PackOrder() {
             </>
           )}
           <s-text-field
+            ref={trackingField}
             label="Tracking number"
+            placeholder="Scan or type the tracking number"
             icon="barcode"
             autocomplete="off"
             maxLength={TRACKING_MAX_LENGTH}
@@ -519,7 +559,11 @@ export default function PackOrder() {
           slot="primary-action"
           variant="primary"
           loading={busy}
-          onClick={() =>
+          onClick={() => {
+            // Closed while Shopify fulfills, so the progress is visible; it
+            // reopens with the error if it fails.
+            fulfillModal.current?.hideOverlay();
+            setPending({ message: "Fulfilling in Shopify…", immediate: true });
             fetcher.submit(
               {
                 intent: "fulfill",
@@ -530,8 +574,8 @@ export default function PackOrder() {
                 notifyCustomer: String(notifyCustomer),
               },
               { method: "post" },
-            )
-          }
+            );
+          }}
         >
           Fulfill
         </s-button>
@@ -543,6 +587,15 @@ export default function PackOrder() {
           Later
         </s-button>
       </s-modal>
+
+      <ScanErrorModal
+        id="pack-error-modal"
+        heading="Not packed"
+        error={scanError}
+        trigger={result}
+        modal={scanErrorModal}
+      />
+      <BlockingOverlay {...activity} />
     </s-page>
   );
 }

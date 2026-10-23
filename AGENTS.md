@@ -17,6 +17,7 @@ Add new conventions here as they are agreed.
 
 - Inventory and picking operate on **variants only** — the unit is the Shopify inventory item (one per variant). Never aggregate or pick at product level.
 - All bin stock changes go through `app/models/bin-stock.server.ts`, which writes `BinStock`, its `StockMovement` and `InventoryLevel.binQuantity` in one transaction. Never update `BinStock` directly elsewhere.
+- A `BinStock` row exists only while its quantity is positive: reaching 0 deletes it (`dropEmptyBinStock`; the bin stays), and units coming back (undo, cancelled round) recreate it (`returnToBin`). Movements keep the history.
 - Bin codes are trimmed and uppercased (`normalizeBinCode` in `app/utils/bins.ts`); unique per shop + location.
 - Excluded everywhere (`isManagedItem` in `app/services/inventory-sync.server.ts`):
   - SKUs starting with `config_` — the catalog was imported from Magento with configurable (parent) products as standalone single-variant products; they never take part in logistics, whatever their Shopify stock.
@@ -61,7 +62,7 @@ The app must look and behave like native Shopify admin. Follow the official App 
 
 - Use Polaris web components (`s-*`) only. No custom CSS, no third-party UI kits, no raw HTML layout where a component exists.
   - End-of-flow pages (picking/packing done) use `SuccessState` (`app/components/SuccessState.tsx`): a 72px illustration in `s-image` (Polaris icons don't render large), outcome, details block, one full-width action.
-  - Single exception: `DisplayText` (`app/components/DisplayText.tsx`) for values operators must read at a distance on scan screens (bin code, cart slot). Polaris has no display-size text. Don't add other custom styling.
+  - Exceptions: `BlockingOverlay` (see "Loading and blocking") and `DisplayText` (`app/components/DisplayText.tsx`) for values operators must read at a distance on scan screens (bin code, cart slot). Polaris has no display-size text. Don't add other custom styling.
 - Responsive props written as `@container (...)` only work inside an `s-query-container`: wrap the page content (`<s-query-container><s-stack gap="base">…`) whenever a page uses them.
 - Picking screens are used on handheld scanners (PDAs, ~360–480px wide): design them mobile-first. Use container queries at `inline-size <= 480px`, and `display="@container (...) none, auto"` to move small pieces (e.g. +/− controls) between layouts. Put what guides the operator first and largest (the bin, then the slot).
 - Pages: one `s-page` per route with `heading`; settings/forms use `inlineSize="small"`. Page-level actions go in the `primary-action` / `secondary-actions` slots, not inside sections.
@@ -81,6 +82,7 @@ The app must look and behave like native Shopify admin. Follow the official App 
 - Bulk writes: `createMany`/`updateMany`, or a single `$transaction` — not one round-trip per row. Stock changes and their `StockMovement` rows go in the same transaction.
 - Every query is scoped by `shop`; indexes must start with the columns used in the `where` (usually `shop`, then the lookup key). Add an index with any new query pattern.
 - Use `select` to avoid loading unused columns on large tables (`BinStock`, `StockMovement`).
+- `inventory_levels/update` only fires when *available* changes. Fulfillments (and their cancellation) change on-hand without touching available, so on-hand is re-read on `fulfillments/create` / `fulfillments/update` (these topics need the `read_fulfillments` scope) and right after the app's own fulfillments (`refreshFulfillmentStock`).
 - Data that list pages filter or sort on across the whole catalog (e.g. Shopify stock vs bin stock) is mirrored locally (`InventoryLevel`) and kept fresh by bulk operations + webhooks — never scan the Admin API per request.
 - Denormalized totals on `InventoryLevel` — `binQuantity` (bins), `boxQuantity` (units picked into boxes whose orders aren't fulfilled/cancelled yet) and `accountedQuantity` (= bin + box) — change only through `adjustLevelTotals` / `recomputeLevelTotals` (`app/models/inventory.server.ts`), in the same transaction as the rows they summarize. Editing `BinStock` / picking tables directly in the database (e.g. Prisma Studio) leaves them stale; a full "Sync with Shopify" recomputes them from source.
 
@@ -110,12 +112,25 @@ The app must look and behave like native Shopify admin. Follow the official App 
 - Store original Shopify image URLs; size them where they're shown with `sizedImageUrl` (`app/utils/images.ts`), e.g. 80px in tables, 320px on detail pages (rendered at half size for sharp screens).
 - Stock status wording: **Consolidated** (Shopify on-hand = units in bins + units in boxes waiting to ship, i.e. `onHand === accountedQuantity`, `tone="success"`) / **Mismatch** (`tone="critical"`). Units picked but not yet fulfilled are still on hand for Shopify, so they count.
 
+## Loading and blocking
+
+- Actions that save data block the page with `BlockingOverlay` (`app/components/BlockingOverlay.tsx`): a fixed layer with a Polaris spinner and what's happening. Don't call `shopify.loading()` with it: the admin then shows its own unlabelled spinner on top. It stays up through the redirect until the next page is ready. Polaris has no blocking overlay; this layer is the only custom positioning besides `DisplayText`.
+- Use `usePageActivity(fetcherBusy, pending)` with a `pending` action set when submitting: long transitions (they call Shopify or change step: last box, last pick, reserving orders, fulfilling, receiving stock, cancelling) use `immediate: true`; single scans only show it after 250 ms, so it doesn't flash. Messages for redirects come from the target path (`NAVIGATION_MESSAGES`).
+- While busy, ignore new scans with an error beep. Close a modal before a long action so the overlay is visible, and reopen it on error.
+- List pages don't block on navigation (search/filter typing); only on their own long actions.
+
 ## Barcode scanning
 
 - Use `useBarcodeScanner` (`app/hooks/useBarcodeScanner.ts`): it buffers keyboard-wedge scanner input and emits the code on Enter, ignoring keys typed into fields and slow (manual) typing.
 - The embedded app only gets key presses while its iframe has focus: show a "Scanner paused" banner using `useWindowFocus`.
 - Scan steps have a visible scan field ("Scan or type …") wired with `useScanField`: Enter in the field submits (Polaris fields don't submit forms on Enter) and the field keeps focus (on load, after each scan, when the app regains focus, after clicks on non-interactive areas), so the scanner types into it. `useBarcodeScanner` stays on as a fallback for scans that arrive with focus elsewhere.
-- Every scan gets audible feedback (`beep` in `app/utils/feedback.ts`) plus a toast on success or a persistent banner on error. Always offer a manual entry field as fallback.
+- Product barcodes are GTINs: compare them with `sameBarcode` / look them up with `barcodeVariants` (`app/utils/barcodes.ts`), never with `===`. The same product can be stored as EAN-13 (`0022600200031`) and scan as UPC-A (`022600200031`).
+- Modals that take a scanned value (e.g. tracking number) focus that field `onAfterShow` and, while open (`onShow`/`onHide`), route scans received without focus to it. A scan never submits a modal by itself.
+- Scan screens keep their space for the work (bin, slot, products, boxes): no inline banners for scan feedback.
+  - Rejected scans open `ScanErrorModal` (`app/components/ScanErrorModal.tsx`), closed by OK, Enter or the next scan (`closeScanError` before processing a scan).
+  - Instructions and "Scanner paused" go in the scan field's `label` / `details`; transient successes are toasts (plus `beep`).
+  - Inline banners only for the page's main state when there's nothing else to do (e.g. an order that can't be packed).
+- Every scan gets audible feedback (`beep` in `app/utils/feedback.ts`). Always offer a manual entry field as fallback.
 
 ## Index pages
 

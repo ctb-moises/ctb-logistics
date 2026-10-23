@@ -1,7 +1,9 @@
 import { Prisma } from "@prisma/client";
 import prisma from "../db.server";
 import type { OrderLine } from "../services/shopify-orders.server";
+import { barcodeVariants } from "../utils/barcodes";
 import { buildPickingPlan } from "../utils/picking-plan";
+import { dropEmptyBinStock, returnToBin } from "./bin-stock.server";
 import { adjustLevelTotals } from "./inventory.server";
 
 // Step 3 of a picking round: the plan (lines + tasks) and picking itself.
@@ -154,7 +156,11 @@ type TaskWithLine = {
   picked: number;
   short: number;
   stockTaken: number;
-  line: { inventoryItemId: string };
+  line: {
+    inventoryItemId: string;
+    variantId: string | null;
+    sku: string | null;
+  };
 };
 
 // Moves one unit between a bin and a task: -1 from the bin when picking, +1
@@ -168,15 +174,26 @@ async function moveBinUnit(
 ) {
   if (task.binId === null) return false;
   const inventoryItemId = task.line.inventoryItemId;
-  const { count } = await tx.binStock.updateMany({
-    where: {
-      binId: task.binId,
-      inventoryItemId,
-      ...(delta < 0 ? { quantity: { gt: 0 } } : {}),
-    },
-    data: { quantity: { increment: delta } },
-  });
-  if (count === 0) return false;
+  if (delta < 0) {
+    const { count } = await tx.binStock.updateMany({
+      where: { binId: task.binId, inventoryItemId, quantity: { gt: 0 } },
+      data: { quantity: { decrement: 1 } },
+    });
+    if (count === 0) return false;
+    await dropEmptyBinStock(tx, task.binId, inventoryItemId);
+  } else {
+    await returnToBin(
+      tx,
+      {
+        shop,
+        binId: task.binId,
+        inventoryItemId,
+        variantId: task.line.variantId,
+        sku: task.line.sku,
+      },
+      1,
+    );
+  }
 
   await tx.stockMovement.create({
     data: {
@@ -200,7 +217,12 @@ const taskSelect = {
   short: true,
   stockTaken: true,
   line: {
-    select: { inventoryItemId: true, pickingOrder: { select: { slot: true } } },
+    select: {
+      inventoryItemId: true,
+      variantId: true,
+      sku: true,
+      pickingOrder: { select: { slot: true } },
+    },
   },
 } as const;
 
@@ -361,7 +383,7 @@ export async function restorePickedStock(
       binId: true,
       picked: true,
       stockTaken: true,
-      line: { select: { inventoryItemId: true } },
+      line: { select: { inventoryItemId: true, variantId: true, sku: true } },
     },
   });
   // Totals per product (units leaving boxes) and per bin and product (units
@@ -369,7 +391,13 @@ export async function restorePickedStock(
   const boxed = new Map<string, number>();
   const returns = new Map<
     string,
-    { binId: number; inventoryItemId: string; units: number }
+    {
+      binId: number;
+      inventoryItemId: string;
+      variantId: string | null;
+      sku: string | null;
+      units: number;
+    }
   >();
   for (const task of tasks) {
     const inventoryItemId = task.line.inventoryItemId;
@@ -379,6 +407,8 @@ export async function restorePickedStock(
     const total = returns.get(key) ?? {
       binId: task.binId,
       inventoryItemId,
+      variantId: task.line.variantId,
+      sku: task.line.sku,
       units: 0,
     };
     total.units += task.stockTaken;
@@ -386,11 +416,18 @@ export async function restorePickedStock(
   }
 
   const binReturns = new Map<string, number>();
-  for (const { binId, inventoryItemId, units } of returns.values()) {
-    await tx.binStock.updateMany({
-      where: { binId, inventoryItemId },
-      data: { quantity: { increment: units } },
-    });
+  for (const {
+    binId,
+    inventoryItemId,
+    variantId,
+    sku,
+    units,
+  } of returns.values()) {
+    await returnToBin(
+      tx,
+      { shop: context.shop, binId, inventoryItemId, variantId, sku },
+      units,
+    );
     await tx.stockMovement.create({
       data: {
         shop: context.shop,
@@ -429,7 +466,7 @@ export async function getStepProduct(roundId: number, step: number) {
 // with units still to pick (to point the picker to it).
 export async function findStepByBarcode(roundId: number, barcode: string) {
   const tasks = await prisma.pickingTask.findMany({
-    where: { roundId, line: { barcode } },
+    where: { roundId, line: { barcode: { in: barcodeVariants(barcode) } } },
     orderBy: { step: "asc" },
     select: {
       step: true,

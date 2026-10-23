@@ -18,9 +18,11 @@ import { authenticate } from "../shopify.server";
 import { getShop } from "../models/shop.server";
 import {
   listInventory,
+  STOCK_STATUS_FILTERS,
   type StockStatusFilter,
 } from "../models/inventory.server";
 import { startInventorySync } from "../services/inventory-sync.server";
+import { BlockingOverlay } from "../components/BlockingOverlay";
 import { sizedImageUrl } from "../utils/images";
 import { legacyId } from "../utils/shopify-ids";
 
@@ -30,6 +32,7 @@ const SEARCH_DEBOUNCE_MS = 300;
 const STOCK_VIEWS: { value: StockStatusFilter; label: string }[] = [
   { value: "all", label: "All" },
   { value: "mismatch", label: "Mismatched" },
+  { value: "in-boxes", label: "In boxes" },
 ];
 
 function parseCursor(value: string | null) {
@@ -46,8 +49,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
 
   const url = new URL(request.url);
-  const status: StockStatusFilter =
-    url.searchParams.get("status") === "mismatch" ? "mismatch" : "all";
+  const status =
+    STOCK_STATUS_FILTERS.find(
+      (filter) => filter === url.searchParams.get("status"),
+    ) ?? "all";
   const query = url.searchParams.get("q")?.trim() ?? "";
   const page = await listInventory(session.shop, shop.locationId, {
     status,
@@ -346,7 +351,9 @@ export default function Inventory() {
                     ? "No products found"
                     : status === "mismatch"
                       ? "No stock mismatches"
-                      : "No products in this warehouse"
+                      : status === "in-boxes"
+                        ? "No products in boxes"
+                        : "No products in this warehouse"
                 }
               >
                 <s-paragraph slot="subheading">
@@ -354,13 +361,21 @@ export default function Inventory() {
                     ? "Try changing the search or the view."
                     : status === "mismatch"
                       ? "Shopify stock matches bin stock for every product."
-                      : `${data.locationName} has no stocked products in Shopify.`}
+                      : status === "in-boxes"
+                        ? "No picked units are waiting to be fulfilled."
+                        : `${data.locationName} has no stocked products in Shopify.`}
                 </s-paragraph>
               </s-empty-state>
             </s-box>
           )}
         </s-section>
       )}
+      {/* Only the sync blocks the page: searching and filtering must not. */}
+      <BlockingOverlay
+        active={fetcher.state !== "idle"}
+        message="Starting the inventory sync…"
+        delayMs={0}
+      />
     </s-page>
   );
 }

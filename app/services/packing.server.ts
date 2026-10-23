@@ -6,6 +6,7 @@ import {
   startFulfilling,
 } from "../models/packing.server";
 import { releaseOrder } from "../models/picking.server";
+import { refreshFulfillmentStock } from "./inventory-sync.server";
 import { PACKED_ORDER_TAG } from "../utils/packing";
 import {
   addOrderTags,
@@ -55,8 +56,9 @@ export async function fulfillPackedOrder(
   if (!(await startFulfilling(shop, order.id))) {
     throw new PackingError("This order is already being fulfilled.");
   }
+  let fulfillmentId: string;
   try {
-    await fulfillOrderAtLocation(
+    fulfillmentId = await fulfillOrderAtLocation(
       admin,
       order.orderId,
       order.locationId,
@@ -74,4 +76,13 @@ export async function fulfillPackedOrder(
     number: tracking.number,
   });
   await releaseOrder(shop, order.orderId);
+  // Shopify's on-hand dropped; no inventory webhook reports that.
+  try {
+    await refreshFulfillmentStock(admin, shop, order.locationId, fulfillmentId);
+  } catch (error) {
+    console.error(
+      `Refreshing stock after fulfillment ${fulfillmentId} failed`,
+      error,
+    );
+  }
 }
