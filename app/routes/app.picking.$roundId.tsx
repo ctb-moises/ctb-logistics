@@ -22,16 +22,15 @@ import {
   usePageActivity,
   type PendingAction,
 } from "../components/BlockingOverlay";
+import { DisplayText } from "../components/DisplayText";
 import { PickingSteps } from "../components/PickingSteps";
-import { closeScanError, ScanErrorModal } from "../components/ScanErrorModal";
 import {
   useBarcodeScanner,
   useScanField,
   useWindowFocus,
 } from "../hooks/useBarcodeScanner";
-import { beep } from "../utils/feedback";
+import { beep, scanErrorToast } from "../utils/feedback";
 import {
-  BOX_CODE_MAX_LENGTH,
   financialStatusLabel,
   isValidBoxCode,
   normalizeBoxCode,
@@ -53,6 +52,13 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   // Boxes are fixed once picking starts: there's no going back to this step.
   if (round.plannedAt) return redirect(`/app/picking/${round.id}/pick`);
 
+  const slots = new Map(
+    round.orders
+      .filter((order) => order.boxAssignedAt)
+      .sort((a, b) => a.boxAssignedAt!.getTime() - b.boxAssignedAt!.getTime())
+      .map((order, index) => [order.id, index + 1]),
+  );
+
   return {
     round: {
       id: round.id,
@@ -61,9 +67,11 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
       orderTag: round.orderTag,
       orderLimit: round.orderLimit,
     },
-    orders: round.orders.map((order) => ({
+    orders: round.orders.map(({ boxAssignedAt, ...order }) => ({
       ...order,
       orderCreatedAt: order.orderCreatedAt.toISOString(),
+      // Cart slot = box scan order (the picking plan numbers slots the same way).
+      slot: boxAssignedAt ? (slots.get(order.id) ?? null) : null,
     })),
   };
 };
@@ -136,7 +144,6 @@ export default function PickingRoundBoxes() {
   const focused = useWindowFocus();
   const cancelModal = useRef<HTMLElementTagNameMap["s-modal"]>(null);
   const boxField = useRef<HTMLElementTagNameMap["s-text-field"]>(null);
-  const scanErrorModal = useRef<HTMLElementTagNameMap["s-modal"]>(null);
   const [boxCode, setBoxCode] = useState("");
   const [pending, setPending] = useState<PendingAction>({ message: "Saving…" });
 
@@ -150,8 +157,6 @@ export default function PickingRoundBoxes() {
 
   const assign = (code: string) => {
     if (!nextOrder) return;
-    // The next scan dismisses the last rejection.
-    closeScanError(scanErrorModal);
     if (busy) {
       beep("error");
       shopify.toast.show("Wait for the previous scan to finish", {
@@ -189,19 +194,15 @@ export default function PickingRoundBoxes() {
   useScanField(boxField, { enabled: scanning, onEnter: submitBoxField });
   useBarcodeScanner(assign, { enabled: scanning });
 
-  // A rejected scan shows in a popup (closed by OK, Enter or the next scan).
-  const scanError =
-    result && !result.ok && result.intent === "assign-box"
-      ? result.error
-      : null;
-
-  // Every scan is confirmed by sound; successes also by a toast.
+  // Every scan is confirmed by sound and a toast (red when rejected).
   useEffect(() => {
     if (!result || result.intent !== "assign-box") return;
     beep(result.ok ? "success" : "error");
     boxField.current?.focus();
     if (result.ok) {
       shopify.toast.show(`Box ${result.boxCode} → ${result.orderName}`);
+    } else {
+      scanErrorToast(shopify, result.error);
     }
   }, [result, shopify]);
 
@@ -224,40 +225,47 @@ export default function PickingRoundBoxes() {
       {/* Container queries below adapt the layout to handheld scanners. */}
       <s-query-container>
         <s-stack gap="base">
-          <PickingSteps current={2} />
-
-          <s-section heading="Filters">
-            <s-grid
-              gridTemplateColumns="@container (inline-size <= 400px) 1fr, 1fr 1fr 1fr auto"
-              gap="base"
-              alignItems="center"
-            >
-              <s-stack gap="small-300">
-                <s-text color="subdued">Payment status</s-text>
-                <s-text type="strong">
-                  {financialStatusLabel(round.financialStatus)}
-                </s-text>
+          {/* Filters are secondary here: behind an icon, on the steps row. */}
+          <s-grid
+            gridTemplateColumns="1fr auto"
+            alignItems="center"
+            gap="small"
+          >
+            <PickingSteps current={2} />
+            <s-button
+              variant="tertiary"
+              icon="filter"
+              accessibilityLabel="Round filters"
+              commandFor="round-filters"
+            />
+          </s-grid>
+          <s-popover id="round-filters">
+            <s-box padding="base">
+              <s-stack gap="base">
+                <s-stack gap="small-300">
+                  <s-text color="subdued">Payment status</s-text>
+                  <s-text type="strong">
+                    {financialStatusLabel(round.financialStatus)}
+                  </s-text>
+                </s-stack>
+                <s-stack gap="small-300">
+                  <s-text color="subdued">Order tag</s-text>
+                  <s-text type="strong">{round.orderTag ?? "Any"}</s-text>
+                </s-stack>
+                <s-stack gap="small-300">
+                  <s-text color="subdued">Orders</s-text>
+                  <s-text type="strong">
+                    {orders.length} of {round.orderLimit}
+                  </s-text>
+                </s-stack>
+                {inProgress && boxedCount === 0 && (
+                  <s-button href={`/app/picking/new?round=${round.id}`}>
+                    Edit filters
+                  </s-button>
+                )}
               </s-stack>
-              <s-stack gap="small-300">
-                <s-text color="subdued">Order tag</s-text>
-                <s-text type="strong">{round.orderTag ?? "Any"}</s-text>
-              </s-stack>
-              <s-stack gap="small-300">
-                <s-text color="subdued">Orders</s-text>
-                <s-text type="strong">
-                  {orders.length} of {round.orderLimit}
-                </s-text>
-              </s-stack>
-              {inProgress && boxedCount === 0 && (
-                <s-button
-                  variant="tertiary"
-                  href={`/app/picking/new?round=${round.id}`}
-                >
-                  Edit
-                </s-button>
-              )}
-            </s-grid>
-          </s-section>
+            </s-box>
+          </s-popover>
 
           <s-section heading="Orders & boxes">
             <s-badge
@@ -276,10 +284,13 @@ export default function PickingRoundBoxes() {
                       submitBoxField();
                     }}
                   >
+                    {/* Enter submits (scanners send it; so does the phone
+                        keyboard). Beside it, the cart slot this box goes in,
+                        stretched to the field's height. */}
                     <s-grid
                       gridTemplateColumns="1fr auto"
                       gap="small-200"
-                      alignItems="end"
+                      alignItems="stretch"
                     >
                       <s-text-field
                         ref={boxField}
@@ -287,20 +298,34 @@ export default function PickingRoundBoxes() {
                         placeholder="Scan or type the box code"
                         details={
                           focused
-                            ? "Each order goes into its own box."
+                            ? undefined
                             : "Scanner paused: tap anywhere on this page so it receives scans."
                         }
                         icon="barcode"
                         autocomplete="off"
-                        maxLength={BOX_CODE_MAX_LENGTH}
                         value={boxCode}
                         onInput={(event) =>
                           setBoxCode(event.currentTarget.value)
                         }
                       />
-                      <s-button type="submit" loading={busy}>
-                        Assign
-                      </s-button>
+                      <s-box
+                        background="strong"
+                        borderRadius="base"
+                        paddingInline="base"
+                        minInlineSize="64px"
+                      >
+                        <s-stack
+                          alignItems="center"
+                          justifyContent="center"
+                          blockSize="100%"
+                          gap="small-500"
+                        >
+                          <s-text color="subdued">SLOT</s-text>
+                          <DisplayText size="compact">
+                            {boxedCount + 1}
+                          </DisplayText>
+                        </s-stack>
+                      </s-box>
                     </s-grid>
                   </form>
                 </>
@@ -360,7 +385,7 @@ export default function PickingRoundBoxes() {
                           </s-link>
                           {order.boxCode ? (
                             <s-badge tone="success" icon="check-circle">
-                              Boxed
+                              {order.slot ? `Slot ${order.slot}` : "Boxed"}
                             </s-badge>
                           ) : isNext ? (
                             <s-badge tone="info" icon="barcode">
@@ -456,13 +481,6 @@ export default function PickingRoundBoxes() {
         </s-button>
       </s-modal>
 
-      <ScanErrorModal
-        id="box-error-modal"
-        heading="Box not assigned"
-        error={scanError}
-        trigger={result}
-        modal={scanErrorModal}
-      />
       <BlockingOverlay {...activity} />
     </s-page>
   );

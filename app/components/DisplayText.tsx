@@ -1,6 +1,8 @@
 import type { ReactNode } from "react";
 
 const SIZES = {
+  // Inline next to a form field, within its height (e.g. the next cart slot).
+  compact: "1.75rem",
   // Bin codes: read while walking the warehouse.
   large: "clamp(2.25rem, 9vw, 3.25rem)",
   // Slot numbers: read at arm's length on the cart.

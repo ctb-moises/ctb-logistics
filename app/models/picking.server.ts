@@ -52,6 +52,7 @@ export async function getRoundWithOrders(shop: string, id: number) {
           orderCreatedAt: true,
           itemCount: true,
           boxCode: true,
+          boxAssignedAt: true,
         },
       },
     },

@@ -17,3 +17,20 @@ export function beep(kind: "success" | "error") {
     // Audio unavailable (e.g. autoplay blocked): feedback stays visual only.
   }
 }
+
+// Rejected scans: a red toast that stays long enough to read from the shelf.
+const SCAN_ERROR_TOAST_MS = 5000;
+
+export function scanErrorToast(
+  shopify: {
+    toast: {
+      show: (
+        message: string,
+        options?: { isError?: boolean; duration?: number },
+      ) => unknown;
+    };
+  },
+  message: string,
+) {
+  shopify.toast.show(message, { isError: true, duration: SCAN_ERROR_TOAST_MS });
+}

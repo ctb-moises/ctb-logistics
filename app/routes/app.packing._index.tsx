@@ -6,6 +6,7 @@ import type {
 } from "react-router";
 import { useFetcher, useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
+import { useAppBridge } from "@shopify/app-bridge-react";
 
 import { authenticate } from "../shopify.server";
 import { getShop } from "../models/shop.server";
@@ -20,9 +21,8 @@ import {
   useScanField,
   useWindowFocus,
 } from "../hooks/useBarcodeScanner";
-import { beep } from "../utils/feedback";
-import { closeScanError, ScanErrorModal } from "../components/ScanErrorModal";
-import { BOX_CODE_MAX_LENGTH, normalizeBoxCode } from "../utils/picking";
+import { beep, scanErrorToast } from "../utils/feedback";
+import { normalizeBoxCode } from "../utils/picking";
 
 // Packing starts by scanning a box: it opens the order inside it.
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -67,19 +67,15 @@ export default function Packing() {
   const data = useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const focused = useWindowFocus();
+  const shopify = useAppBridge();
   const boxField = useRef<HTMLElementTagNameMap["s-text-field"]>(null);
-  const scanErrorModal = useRef<HTMLElementTagNameMap["s-modal"]>(null);
   const [boxCode, setBoxCode] = useState("");
   const activity = usePageActivity(fetcher.state !== "idle", {
     message: "Opening the box…",
   });
   // Busy until the box is checked and its order page loads.
   const busy = activity.active;
-  const error = fetcher.state === "idle" ? fetcher.data?.error : undefined;
-
   const open = (code: string) => {
-    // The next scan dismisses the last rejection.
-    closeScanError(scanErrorModal);
     if (busy || !code.trim()) return;
     fetcher.submit({ boxCode: code }, { method: "post" });
   };
@@ -92,10 +88,12 @@ export default function Packing() {
   useScanField(boxField, { enabled: scanning, onEnter: submitField });
   useBarcodeScanner(open, { enabled: scanning });
 
-  // A rejected box: error sound (opening a box navigates away).
+  // A rejected box: error sound and toast (opening a box navigates away).
   useEffect(() => {
-    if (fetcher.state === "idle" && fetcher.data?.error) beep("error");
-  }, [fetcher.state, fetcher.data]);
+    if (fetcher.state !== "idle" || !fetcher.data?.error) return;
+    beep("error");
+    scanErrorToast(shopify, fetcher.data.error);
+  }, [fetcher.state, fetcher.data, shopify]);
 
   if (!data.configured) {
     return (
@@ -134,30 +132,21 @@ export default function Packing() {
                   submitField();
                 }}
               >
-                <s-grid
-                  gridTemplateColumns="1fr auto"
-                  gap="small-200"
-                  alignItems="end"
-                >
-                  <s-text-field
-                    ref={boxField}
-                    label="Scan a picked box to pack its order"
-                    placeholder="Scan or type the box code"
-                    details={
-                      focused
-                        ? undefined
-                        : "Scanner paused: tap anywhere on this page so it receives scans."
-                    }
-                    icon="barcode"
-                    autocomplete="off"
-                    maxLength={BOX_CODE_MAX_LENGTH}
-                    value={boxCode}
-                    onInput={(event) => setBoxCode(event.currentTarget.value)}
-                  />
-                  <s-button type="submit" loading={busy}>
-                    Open
-                  </s-button>
-                </s-grid>
+                {/* Enter submits (scanners send it; so does the phone keyboard). */}
+                <s-text-field
+                  ref={boxField}
+                  label="Scan a picked box to pack its order"
+                  placeholder="Scan or type the box code"
+                  details={
+                    focused
+                      ? undefined
+                      : "Scanner paused: tap anywhere on this page so it receives scans."
+                  }
+                  icon="barcode"
+                  autocomplete="off"
+                  value={boxCode}
+                  onInput={(event) => setBoxCode(event.currentTarget.value)}
+                />
               </form>
             </s-stack>
           </s-section>
@@ -217,13 +206,6 @@ export default function Packing() {
           </s-section>
         </s-stack>
       </s-query-container>
-      <ScanErrorModal
-        id="box-error-modal"
-        heading="Can't open this box"
-        error={error ?? null}
-        trigger={fetcher.data}
-        modal={scanErrorModal}
-      />
       <BlockingOverlay {...activity} />
     </s-page>
   );

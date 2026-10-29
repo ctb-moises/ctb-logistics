@@ -22,10 +22,17 @@ export async function setShopLocation(
   });
 }
 
-export async function setPickingBatchSizes(shop: string, sizes: number[]) {
+export async function setPickingBatchSizes(
+  shop: string,
+  sizes: number[],
+  defaultSize: number | null,
+) {
   return prisma.shop.update({
     where: { shop },
-    data: { pickingBatchSizes: sizes.join(",") },
+    data: {
+      pickingBatchSizes: sizes.join(","),
+      pickingDefaultBatchSize: defaultSize,
+    },
   });
 }
 

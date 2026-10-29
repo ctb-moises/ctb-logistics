@@ -1,6 +1,8 @@
 const STEPS = ["Filters", "Orders & boxes", "Pick"];
 
-// Wizard progress for a picking round. `current` is 1-based.
+// Wizard progress for a picking round. `current` is 1-based. On handhelds only
+// the current step keeps its name (the others show their number), so the steps
+// fit on one line. Needs an s-query-container around it.
 export function PickingSteps({ current }: { current: number }) {
   return (
     <s-stack direction="inline" gap="small-200" alignItems="center">
@@ -23,12 +25,20 @@ export function PickingSteps({ current }: { current: number }) {
             >
               {String(step)}
             </s-badge>
-            <s-text
-              type={step === current ? "strong" : undefined}
-              color={step > current ? "subdued" : undefined}
+            <s-box
+              display={
+                step === current
+                  ? "auto"
+                  : "@container (inline-size <= 480px) none, auto"
+              }
             >
-              {label}
-            </s-text>
+              <s-text
+                type={step === current ? "strong" : undefined}
+                color={step > current ? "subdued" : undefined}
+              >
+                {label}
+              </s-text>
+            </s-box>
           </s-stack>
         );
       })}

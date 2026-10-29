@@ -27,15 +27,13 @@ import {
   usePageActivity,
   type PendingAction,
 } from "../components/BlockingOverlay";
-import { PickingSteps } from "../components/PickingSteps";
-import { closeScanError, ScanErrorModal } from "../components/ScanErrorModal";
 import {
   useBarcodeScanner,
   useScanField,
   useWindowFocus,
 } from "../hooks/useBarcodeScanner";
 import { sameBarcode } from "../utils/barcodes";
-import { beep } from "../utils/feedback";
+import { beep, scanErrorToast } from "../utils/feedback";
 import { sizedImageUrl } from "../utils/images";
 
 const CANCEL_MODAL_ID = "cancel-round-modal";
@@ -210,7 +208,6 @@ export default function PickingRun() {
   const focused = useWindowFocus();
   const [searchParams, setSearchParams] = useSearchParams();
   const productField = useRef<HTMLElementTagNameMap["s-text-field"]>(null);
-  const scanErrorModal = useRef<HTMLElementTagNameMap["s-modal"]>(null);
   const [barcode, setBarcode] = useState("");
   const [pending, setPending] = useState<PendingAction>({
     message: "Picking…",
@@ -238,7 +235,6 @@ export default function PickingRun() {
     message: "Finishing the picking round…",
     immediate: true,
   };
-  const scanError = result && !result.ok ? result.error : null;
   const scanning = inProgress && !!current && !current.done;
 
   const goToStep = (step: number) =>
@@ -264,8 +260,6 @@ export default function PickingRun() {
   };
 
   const scan = (code: string) => {
-    // The next scan dismisses the last rejection.
-    closeScanError(scanErrorModal);
     if (busy) {
       beep("error");
       shopify.toast.show("Wait for the previous scan to finish", {
@@ -292,6 +286,7 @@ export default function PickingRun() {
     if (result.intent === "scan" || !result.ok)
       beep(result.ok ? "success" : "error");
     productField.current?.focus();
+    if (!result.ok) scanErrorToast(shopify, result.error);
     if (!result.ok || !result.stepComplete || result.roundComplete) return;
     shopify.toast.show("Step done");
 
@@ -394,8 +389,6 @@ export default function PickingRun() {
       {/* Container queries below adapt the layout to handheld scanners. */}
       <s-query-container>
         <s-stack gap="base">
-          <PickingSteps current={3} />
-
           <s-section accessibilityLabel="Picking progress">
             <s-stack gap="small-300">
               <s-grid gridTemplateColumns="1fr auto" alignItems="center">
@@ -577,31 +570,23 @@ export default function PickingRun() {
                         submitField();
                       }}
                     >
-                      <s-grid
-                        gridTemplateColumns="1fr auto"
-                        gap="small-200"
-                        alignItems="end"
-                      >
-                        <s-text-field
-                          ref={productField}
-                          label={`Scan ${current.product.productTitle}`}
-                          placeholder="Scan or type the product barcode"
-                          details={
-                            focused
-                              ? "Each scan puts one unit into the next box below."
-                              : "Scanner paused: tap anywhere on this page so it receives scans."
-                          }
-                          icon="barcode"
-                          autocomplete="off"
-                          value={barcode}
-                          onInput={(event) =>
-                            setBarcode(event.currentTarget.value)
-                          }
-                        />
-                        <s-button type="submit" loading={busy}>
-                          Pick
-                        </s-button>
-                      </s-grid>
+                      {/* Enter submits (scanners send it; so does the phone keyboard). */}
+                      <s-text-field
+                        ref={productField}
+                        label={`Scan ${current.product.productTitle}`}
+                        placeholder="Scan or type the product barcode"
+                        details={
+                          focused
+                            ? undefined
+                            : "Scanner paused: tap anywhere on this page so it receives scans."
+                        }
+                        icon="barcode"
+                        autocomplete="off"
+                        value={barcode}
+                        onInput={(event) =>
+                          setBarcode(event.currentTarget.value)
+                        }
+                      />
                     </form>
                   </s-stack>
                 </s-section>
@@ -709,13 +694,6 @@ export default function PickingRun() {
       </s-query-container>
 
       {cancelModal}
-      <ScanErrorModal
-        id="pick-error-modal"
-        heading="Not picked"
-        error={scanError}
-        trigger={result}
-        modal={scanErrorModal}
-      />
       <BlockingOverlay {...activity} />
     </s-page>
   );

@@ -84,13 +84,7 @@ function formatDate(iso: string) {
   });
 }
 
-function Metric({
-  label,
-  children,
-}: {
-  label: string;
-  children: ReactNode;
-}) {
+function Metric({ label, children }: { label: string; children: ReactNode }) {
   return (
     <s-grid gap="small-300">
       <s-text color="subdued">{label}</s-text>

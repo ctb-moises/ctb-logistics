@@ -28,8 +28,7 @@ import {
   usePageActivity,
   type PendingAction,
 } from "../components/BlockingOverlay";
-import { closeScanError, ScanErrorModal } from "../components/ScanErrorModal";
-import { beep } from "../utils/feedback";
+import { beep, scanErrorToast } from "../utils/feedback";
 import { sizedImageUrl } from "../utils/images";
 import { CARRIERS, OTHER_CARRIER, TRACKING_MAX_LENGTH } from "../utils/packing";
 import { legacyId } from "../utils/shopify-ids";
@@ -167,7 +166,6 @@ export default function PackOrder() {
   const shopify = useAppBridge();
   const focused = useWindowFocus();
   const productField = useRef<HTMLElementTagNameMap["s-text-field"]>(null);
-  const scanErrorModal = useRef<HTMLElementTagNameMap["s-modal"]>(null);
   const fulfillModal = useRef<HTMLElementTagNameMap["s-modal"]>(null);
   const trackingField = useRef<HTMLElementTagNameMap["s-text-field"]>(null);
   const [fulfillOpen, setFulfillOpen] = useState(false);
@@ -185,8 +183,6 @@ export default function PackOrder() {
   // Busy until the action is saved and, if it navigates, the next page loads.
   const busy = activity.active;
   const result = fetcher.state === "idle" ? fetcher.data : undefined;
-  const scanError =
-    result && !result.ok && result.intent !== "fulfill" ? result.error : null;
   const fulfillError =
     result && !result.ok && result.intent === "fulfill" ? result.error : null;
 
@@ -200,8 +196,6 @@ export default function PackOrder() {
   // The order's last unit finishes packing (tag in Shopify, then the success
   // page or the tracking modal): block right away.
   const packUnit = (data: Record<string, string | number>) => {
-    // The next scan dismisses the last rejection.
-    closeScanError(scanErrorModal);
     if (busy) {
       beep("error");
       return;
@@ -242,6 +236,8 @@ export default function PackOrder() {
     // The modal was closed to show progress: bring it back with the error.
     if (!result.ok && result.intent === "fulfill") {
       fulfillModal.current?.showOverlay();
+    } else if (!result.ok) {
+      scanErrorToast(shopify, result.error);
     }
     if (!result.ok) return;
     // Pack and fulfill: once packed, go straight to tracking.
@@ -345,29 +341,21 @@ export default function PackOrder() {
                     setBarcode("");
                   }}
                 >
-                  <s-grid
-                    gridTemplateColumns="1fr auto"
-                    gap="small-200"
-                    alignItems="end"
-                  >
-                    <s-text-field
-                      ref={productField}
-                      label="Scan each product"
-                      placeholder="Scan or type the product barcode"
-                      details={
-                        focused
-                          ? "Every scan checks one unit into the parcel."
-                          : "Scanner paused: tap anywhere on this page so it receives scans."
-                      }
-                      icon="barcode"
-                      autocomplete="off"
-                      value={barcode}
-                      onInput={(event) => setBarcode(event.currentTarget.value)}
-                    />
-                    <s-button type="submit" loading={busy}>
-                      Pack
-                    </s-button>
-                  </s-grid>
+                  {/* Enter submits (scanners send it; so does the phone keyboard). */}
+                  <s-text-field
+                    ref={productField}
+                    label="Scan each product"
+                    placeholder="Scan or type the product barcode"
+                    details={
+                      focused
+                        ? undefined
+                        : "Scanner paused: tap anywhere on this page so it receives scans."
+                    }
+                    icon="barcode"
+                    autocomplete="off"
+                    value={barcode}
+                    onInput={(event) => setBarcode(event.currentTarget.value)}
+                  />
                 </form>
               </s-stack>
             </s-section>
@@ -588,13 +576,6 @@ export default function PackOrder() {
         </s-button>
       </s-modal>
 
-      <ScanErrorModal
-        id="pack-error-modal"
-        heading="Not packed"
-        error={scanError}
-        trigger={result}
-        modal={scanErrorModal}
-      />
       <BlockingOverlay {...activity} />
     </s-page>
   );

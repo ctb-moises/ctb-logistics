@@ -29,7 +29,7 @@ Add new conventions here as they are agreed.
 - In the rounds list, in-progress rows open `/app/picking/:id`, which resumes at the current step (step 2, or redirect to step 3); completed rows open the read-only summary `/app/picking/:id/summary` (results by order, in slot order). Step 3 redirects to a success page (`/app/picking/:id/done`, totals + "Back to picking rounds") once the round completes; the summary is only opened from the list. When a round completes, its fully picked orders get the Shopify tag `picked` (`PICKED_ORDER_TAG`; orders with missing units don't). `tagsAdd` takes one order, so `addOrderTags` batches up to 25 aliased mutations per request; `PickingOrder.taggedAt` records success and the success page retries the rest.
 - Round statuses: `IN_PROGRESS` ("In progress", tone info; set when step 1 creates the round, so the wizard survives refreshes and can be resumed) and `COMPLETED` ("Completed", tone success). Labels/tones live in `PICKING_STATUSES` (`app/utils/picking.ts`). Filters are editable only while `IN_PROGRESS`.
 - Filters: Shopify financial status (default `paid`), optional order tag, and order count. Only unfulfilled orders of the selected location are picked.
-- "Orders per round" options come from Settings (`Shop.pickingBatchSizes`, comma-separated, first = default; parsed by `parseBatchSizes`).
+- "Orders per round" options come from Settings (`Shop.pickingBatchSizes`, comma-separated, parsed by `parseBatchSizes`). The preselected one is `Shop.pickingDefaultBatchSize`, resolved by `defaultBatchSize` (first option if unset or no longer listed).
 - Step 1 "Next" reserves the orders (oldest first, unfulfilled, with an open fulfillment order at the location, not reserved by another round) — `reserveRoundOrders` in `app/services/picking.server.ts`. A round is only created if at least one order is reserved.
 - Concurrency is enforced by unique keys on `PickingOrder` that are set only while held: `reservationKey` (`<shop>|<orderId>`) and `boxKey` (`<shop>|<boxCode>`). Never check-then-write without them; a unique violation means another round won (retry or report).
 - Cancelling a round deletes it: its orders and boxes are released. Filters can only change before any box is assigned.
@@ -40,6 +40,8 @@ Add new conventions here as they are agreed.
 - Picking a unit (scan or +) takes it from the bin right away: `BinStock` −1, `StockMovement` `PICK` (reference `picking-round:<id>`), `InventoryLevel.binQuantity` −1, in one transaction. `stockTaken` records units really taken, so undo (−) and cancelling a round return exactly those. Each picked unit moves from `binQuantity` to `boxQuantity`; on fulfillment (webhook) it leaves `boxQuantity` while Shopify's on-hand drops, so the product stays Consolidated throughout.
 - A scan must match the step product's barcode (variant barcode); otherwise show an error, naming the product and step if the barcode belongs to another product of the round. "Mark as missing" records the rest of the step as `short`.
 - When every task is picked or short the round becomes `COMPLETED`. Reservations and boxes stay held until Shopify reports the order fulfilled or cancelled — a completed round's orders are still unfulfilled and must not be picked again. A completed step auto-advances to the next open step after 1 s.
+- `PickingSteps` condenses on handhelds (only the current step keeps its name) and needs an `s-query-container` around it.
+- Step 3 (picking) has no `PickingSteps`: its progress bar already says where the picker is, and the space goes to the bin, product and boxes.
 - Wizard pages use `inlineSize="small"`, show `PickingSteps` at the top and end with Cancel/Back + primary Next aligned right.
 
 ## Packing & Fulfillment domain
@@ -62,7 +64,7 @@ The app must look and behave like native Shopify admin. Follow the official App 
 
 - Use Polaris web components (`s-*`) only. No custom CSS, no third-party UI kits, no raw HTML layout where a component exists.
   - End-of-flow pages (picking/packing done) use `SuccessState` (`app/components/SuccessState.tsx`): a 72px illustration in `s-image` (Polaris icons don't render large), outcome, details block, one full-width action.
-  - Exceptions: `BlockingOverlay` (see "Loading and blocking") and `DisplayText` (`app/components/DisplayText.tsx`) for values operators must read at a distance on scan screens (bin code, cart slot). Polaris has no display-size text. Don't add other custom styling.
+  - Exceptions: `BlockingOverlay` (see "Loading and blocking") and `DisplayText` (`app/components/DisplayText.tsx`) for values operators must read at a distance on scan screens (bin code, cart slot; `compact` size for a value inline next to a form field, e.g. the next slot beside the box scan field). Polaris has no display-size text. Don't add other custom styling.
 - Responsive props written as `@container (...)` only work inside an `s-query-container`: wrap the page content (`<s-query-container><s-stack gap="base">…`) whenever a page uses them.
 - Picking screens are used on handheld scanners (PDAs, ~360–480px wide): design them mobile-first. Use container queries at `inline-size <= 480px`, and `display="@container (...) none, auto"` to move small pieces (e.g. +/− controls) between layouts. Put what guides the operator first and largest (the bin, then the slot).
 - Pages: one `s-page` per route with `heading`; settings/forms use `inlineSize="small"`. Page-level actions go in the `primary-action` / `secondary-actions` slots, not inside sections.
@@ -126,8 +128,9 @@ The app must look and behave like native Shopify admin. Follow the official App 
 - Scan steps have a visible scan field ("Scan or type …") wired with `useScanField`: Enter in the field submits (Polaris fields don't submit forms on Enter) and the field keeps focus (on load, after each scan, when the app regains focus, after clicks on non-interactive areas), so the scanner types into it. `useBarcodeScanner` stays on as a fallback for scans that arrive with focus elsewhere.
 - Product barcodes are GTINs: compare them with `sameBarcode` / look them up with `barcodeVariants` (`app/utils/barcodes.ts`), never with `===`. The same product can be stored as EAN-13 (`0022600200031`) and scan as UPC-A (`022600200031`).
 - Modals that take a scanned value (e.g. tracking number) focus that field `onAfterShow` and, while open (`onShow`/`onHide`), route scans received without focus to it. A scan never submits a modal by itself.
+- Scan fields have no submit button (Enter submits: scanners send it, so does the phone keyboard), no `maxLength` counter (validate on the server), and `details` only for "Scanner paused". Secondary info (e.g. a round's filters) goes behind an icon/popover, not in a section.
 - Scan screens keep their space for the work (bin, slot, products, boxes): no inline banners for scan feedback.
-  - Rejected scans open `ScanErrorModal` (`app/components/ScanErrorModal.tsx`), closed by OK, Enter or the next scan (`closeScanError` before processing a scan).
+  - Rejected scans show a red Shopify toast (`scanErrorToast` in `app/utils/feedback.ts`, 5 s) plus the error beep — not a modal, not a banner.
   - Instructions and "Scanner paused" go in the scan field's `label` / `details`; transient successes are toasts (plus `beep`).
   - Inline banners only for the page's main state when there's nothing else to do (e.g. an order that can't be packed).
 - Every scan gets audible feedback (`beep` in `app/utils/feedback.ts`). Always offer a manual entry field as fallback.

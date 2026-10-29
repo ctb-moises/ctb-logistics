@@ -23,9 +23,9 @@ export default function App() {
         <a href="/app" rel="home">
           Dashboard
         </a>
-        <s-link href="/app/inventory">Inventory</s-link>
         <s-link href="/app/picking">Picking</s-link>
         <s-link href="/app/packing">Packing</s-link>
+        <s-link href="/app/inventory">Inventory</s-link>
         <s-link href="/app/settings">Settings</s-link>
       </s-app-nav>
       <Outlet />

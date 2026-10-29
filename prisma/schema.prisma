@@ -38,29 +38,31 @@ model Session {
 // The Shopify Location selected here is the warehouse that bin management and
 // all picking operations run against.
 model Shop {
-  shop              String           @id // myshopify domain, e.g. store.myshopify.com
-  locationId        String? // gid://shopify/Location/...
-  locationName      String?
+  shop                    String           @id // myshopify domain, e.g. store.myshopify.com
+  locationId              String? // gid://shopify/Location/...
+  locationName            String?
   // Full inventory sync (Shopify bulk operation) for the selected location.
-  syncOperationId   String? // gid://shopify/BulkOperation/...
-  syncStatus        String? // RUNNING | COMPLETED | FAILED
-  syncedAt          DateTime?
-  // Picking: comma-separated "orders per round" options; the first is the default.
-  pickingBatchSizes String           @default("1,4,8,16,32")
+  syncOperationId         String? // gid://shopify/BulkOperation/...
+  syncStatus              String? // RUNNING | COMPLETED | FAILED
+  syncedAt                DateTime?
+  // Picking: comma-separated "orders per round" options, and the one selected by
+  // default when starting a round (the first option if unset or no longer listed).
+  pickingBatchSizes       String           @default("1,4,8,16,32")
+  pickingDefaultBatchSize Int?
   // Packing: PACK (tag only) | PACK_AND_FULFILL (also fulfill in Shopify).
-  packingMode       String           @default("PACK")
+  packingMode             String           @default("PACK")
   // Shop time zone (IANA, from Shopify), for "today" and per-day stats.
-  timezone          String?
-  createdAt         DateTime         @default(now())
-  updatedAt         DateTime         @updatedAt
-  bins              Bin[]
-  binStock          BinStock[]
-  movements         StockMovement[]
-  inventory         InventoryLevel[]
-  pickingRounds     PickingRound[]
-  pickingOrders     PickingOrder[]
-  pickingLines      PickingLine[]
-  pickingTasks      PickingTask[]
+  timezone                String?
+  createdAt               DateTime         @default(now())
+  updatedAt               DateTime         @updatedAt
+  bins                    Bin[]
+  binStock                BinStock[]
+  movements               StockMovement[]
+  inventory               InventoryLevel[]
+  pickingRounds           PickingRound[]
+  pickingOrders           PickingOrder[]
+  pickingLines            PickingLine[]
+  pickingTasks            PickingTask[]
 }
 
 // Physical storage location inside a Shopify location (aisle/rack/shelf).

@@ -21,13 +21,13 @@ import {
 } from "../components/BlockingOverlay";
 import { PickingSteps } from "../components/PickingSteps";
 import {
+  DEFAULT_BATCH_SIZES,
+  defaultBatchSize,
   FINANCIAL_STATUSES,
   isFinancialStatus,
   ORDER_TAG_MAX_LENGTH,
   parseBatchSizes,
 } from "../utils/picking";
-
-const DEFAULT_BATCH_SIZES = [1, 4, 8, 16, 32];
 
 // Step 1 of the picking wizard: order filters. With ?round=<id> it edits the
 // filters of an in-progress round (coming back from step 2).
@@ -47,6 +47,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     configured: true as const,
     locationName: shop.locationName,
     batchSizes,
+    defaultSize: defaultBatchSize(batchSizes, shop.pickingDefaultBatchSize),
     round:
       round?.status === "IN_PROGRESS"
         ? {
@@ -151,76 +152,79 @@ export default function NewPickingRound() {
     );
   }
 
-  const { round, batchSizes, locationName } = data;
+  const { round, batchSizes, defaultSize, locationName } = data;
 
   return (
     <s-page heading="New picking round" inlineSize="small">
       <s-link slot="breadcrumb-actions" href="/app/picking">
         Picking
       </s-link>
-      <Form method="post">
-        {round && <input type="hidden" name="roundId" value={round.id} />}
-        <s-stack gap="base">
-          <PickingSteps current={1} />
-          {errors?.form && (
-            <s-banner
-              tone="warning"
-              heading={round ? "Round not updated" : "Round not started"}
-            >
-              {errors.form}
-            </s-banner>
-          )}
+      {/* Lets PickingSteps condense on handhelds. */}
+      <s-query-container>
+        <Form method="post">
+          {round && <input type="hidden" name="roundId" value={round.id} />}
+          <s-stack gap="base">
+            <PickingSteps current={1} />
+            {errors?.form && (
+              <s-banner
+                tone="warning"
+                heading={round ? "Round not updated" : "Round not started"}
+              >
+                {errors.form}
+              </s-banner>
+            )}
 
-          <s-section
-            heading="Orders"
-            subheading={`Unfulfilled orders in ${locationName} that match these filters are picked in this round.`}
-          >
-            <s-select
-              name="financialStatus"
-              label="Payment status"
-              value={round?.financialStatus ?? "paid"}
-              error={errors?.financialStatus}
+            <s-section
+              heading="Orders"
+              subheading={`Unfulfilled orders in ${locationName} that match these filters are picked in this round.`}
             >
-              {FINANCIAL_STATUSES.map((status) => (
-                <s-option key={status.value} value={status.value}>
-                  {status.label}
-                </s-option>
-              ))}
-            </s-select>
-            <s-text-field
-              name="orderTag"
-              label="Order tag"
-              details="Optional. Only orders with this tag are picked."
-              maxLength={ORDER_TAG_MAX_LENGTH}
-              value={round?.orderTag ?? ""}
-              error={errors?.orderTag}
-            />
-            <s-select
-              name="orderLimit"
-              label="Orders in this round"
-              value={String(round?.orderLimit ?? batchSizes[0])}
-              error={errors?.orderLimit}
-            >
-              {batchSizes.map((size) => (
-                <s-option key={size} value={String(size)}>
-                  {size === 1 ? "1 order" : `${size} orders`}
-                </s-option>
-              ))}
-            </s-select>
-          </s-section>
+              <s-select
+                name="financialStatus"
+                label="Payment status"
+                value={round?.financialStatus ?? "paid"}
+                error={errors?.financialStatus}
+              >
+                {FINANCIAL_STATUSES.map((status) => (
+                  <s-option key={status.value} value={status.value}>
+                    {status.label}
+                  </s-option>
+                ))}
+              </s-select>
+              <s-text-field
+                name="orderTag"
+                label="Order tag"
+                details="Optional. Only orders with this tag are picked."
+                maxLength={ORDER_TAG_MAX_LENGTH}
+                value={round?.orderTag ?? ""}
+                error={errors?.orderTag}
+              />
+              <s-select
+                name="orderLimit"
+                label="Orders in this round"
+                value={String(round?.orderLimit ?? defaultSize)}
+                error={errors?.orderLimit}
+              >
+                {batchSizes.map((size) => (
+                  <s-option key={size} value={String(size)}>
+                    {size === 1 ? "1 order" : `${size} orders`}
+                  </s-option>
+                ))}
+              </s-select>
+            </s-section>
 
-          <s-stack direction="inline" gap="small-200" justifyContent="end">
-            <s-button href="/app/picking">Cancel</s-button>
-            <s-button
-              type="submit"
-              variant="primary"
-              loading={navigation.state !== "idle"}
-            >
-              Next
-            </s-button>
+            <s-stack direction="inline" gap="small-200" justifyContent="end">
+              <s-button href="/app/picking">Cancel</s-button>
+              <s-button
+                type="submit"
+                variant="primary"
+                loading={navigation.state !== "idle"}
+              >
+                Next
+              </s-button>
+            </s-stack>
           </s-stack>
-        </s-stack>
-      </Form>
+        </Form>
+      </s-query-container>
       <BlockingOverlay {...activity} />
     </s-page>
   );

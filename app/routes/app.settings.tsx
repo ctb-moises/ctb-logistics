@@ -19,7 +19,12 @@ import {
   setPickingBatchSizes,
   setShopLocation,
 } from "../models/shop.server";
-import { MAX_ORDERS_PER_ROUND, parseBatchSizes } from "../utils/picking";
+import {
+  DEFAULT_BATCH_SIZES,
+  defaultBatchSize,
+  MAX_ORDERS_PER_ROUND,
+  parseBatchSizes,
+} from "../utils/picking";
 import { isPackingMode, PACKING_MODES } from "../utils/packing";
 import { startInventorySync } from "../services/inventory-sync.server";
 
@@ -84,6 +89,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     String(formData.get("pickingBatchSizes") ?? ""),
   );
   const packingMode = String(formData.get("packingMode") ?? "");
+  // Kept even if the options change in the same save: when it's no longer an
+  // option, starting a round falls back to the first one.
+  const defaultSize = Number(formData.get("pickingDefaultBatchSize"));
+  const pickingDefaultBatchSize =
+    Number.isInteger(defaultSize) &&
+    defaultSize >= 1 &&
+    defaultSize <= MAX_ORDERS_PER_ROUND
+      ? defaultSize
+      : null;
   const errors: SettingsErrors = {};
 
   // Validate against Shopify so we never store an invalid id or one from another shop.
@@ -107,7 +121,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   const previous = await getShop(session.shop);
   await setShopLocation(session.shop, location);
-  await setPickingBatchSizes(session.shop, batchSizes);
+  await setPickingBatchSizes(session.shop, batchSizes, pickingDefaultBatchSize);
   await setPackingMode(session.shop, packingMode);
   // A new warehouse needs a fresh copy of its Shopify stock.
   if (previous?.locationId !== location.id) {
@@ -118,6 +132,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
 export default function Settings() {
   const { locations, settings } = useLoaderData<typeof loader>();
+  const batchSizes =
+    parseBatchSizes(settings?.pickingBatchSizes ?? "") ?? DEFAULT_BATCH_SIZES;
   const actionData = useActionData<typeof action>();
   const submit = useSubmit();
   // Saving may start a full inventory sync when the warehouse changes.
@@ -169,12 +185,29 @@ export default function Settings() {
           <s-text-field
             name="pickingBatchSizes"
             label="Orders per round"
-            details="Comma-separated, e.g. 1, 4, 8, 16, 32. The first one is selected by default."
+            details="Comma-separated, e.g. 1, 4, 8, 16, 32."
             value={(settings?.pickingBatchSizes ?? "1,4,8,16,32")
               .split(",")
               .join(", ")}
             error={actionData?.errors.pickingBatchSizes}
           />
+          <s-select
+            name="pickingDefaultBatchSize"
+            label="Default orders per round"
+            details="Selected when starting a round. To pick a new option, save it in the list above first."
+            value={String(
+              defaultBatchSize(
+                batchSizes,
+                settings?.pickingDefaultBatchSize ?? null,
+              ),
+            )}
+          >
+            {batchSizes.map((size) => (
+              <s-option key={size} value={String(size)}>
+                {size === 1 ? "1 order" : `${size} orders`}
+              </s-option>
+            ))}
+          </s-select>
         </s-section>
         <s-section
           heading="Packing & Fulfillment"

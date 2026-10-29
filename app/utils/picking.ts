@@ -34,6 +34,14 @@ export function isFinancialStatus(value: string): value is FinancialStatus {
   return FINANCIAL_STATUSES.some((status) => status.value === value);
 }
 
+export const DEFAULT_BATCH_SIZES = [1, 4, 8, 16, 32];
+
+// The option selected when starting a round: the configured default if it's
+// still one of the options, otherwise the first option.
+export function defaultBatchSize(sizes: number[], preferred: number | null) {
+  return preferred !== null && sizes.includes(preferred) ? preferred : sizes[0];
+}
+
 // Parses the "orders per round" setting ("1, 4, 8"). Returns null if any entry
 // isn't a whole number between 1 and MAX_ORDERS_PER_ROUND or is repeated.
 export function parseBatchSizes(text: string): number[] | null {
